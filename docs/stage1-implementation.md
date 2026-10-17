@@ -64,10 +64,12 @@ ctest --test-dir build/stage1-tests --output-on-failure
 
 cmake -S chatserver -B build/chatserver -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/chatserver -j
-mysql -u Aoi_ -p chat < chatserver/sql/001_stage1_security.sql
+mysql -u Aoi_ -p < chatserver/sql/002_clone_chat_to_nexusim.sql
 ```
 
-按 `chatserver/.env.example` 设置环境变量，但不要提交实际密码。先启动 MySQL/Redis，再启动 ChatServer，执行：
+`002_clone_chat_to_nexusim.sql` 新建独立的 `nexusim` 数据库并从旧 `chat` 复制五张表，不会修改或删除 `chat`。目标表只要有任意数据，脚本就中止，避免重复迁移产生重复行。若 `Aoi_` 没有创建数据库的权限，应由数据库管理员执行脚本，再查询 `mysql.user` 中 `Aoi_` 的实际 `Host` 并为该账户授予 `nexusim.*` 的运行权限。不要凭空假设账户 Host 为 `localhost` 或 `%`。
+
+按 `chatserver/.env.example` 设置环境变量（特别是 `CHAT_DB_NAME=nexusim`），但不要提交实际密码。先启动 MySQL/Redis，再启动 ChatServer，执行：
 
 ```bash
 python3 tests/stage1/server_frame_probe.py --host 127.0.0.1 --port 6000
@@ -75,7 +77,7 @@ python3 tests/stage1/server_frame_probe.py --host 127.0.0.1 --port 6000
 
 集成验收还必须人工或自动记录：
 
-1. 注册后确认 `User.password` 是 `pbkdf2_sha256$...`，不是原密码；包含单引号的用户名和消息不改变 SQL 结构。
+1. 旧密码被原样复制到新库以保持登录兼容；每个旧账号必须在隔离环境成功登录一次，确认 `nexusim.User.password` 随即变成 `pbkdf2_sha256$...`。新注册账号必须直接保存该格式；包含单引号的用户名和消息不得改变 SQL 结构。
 2. 两个连接登录 A/B，A 发送伪造的 `id/name`，B 收到的发送者仍是 A 的认证身份。
 3. 用代理延迟 MySQL/Redis 请求时，另一个连接仍能收到协议错误/业务响应；EventLoop 线程栈中不出现同步数据库、Redis 或 RPC 调用。
 4. 两个 ChatServer 设置不同 `CHAT_NODE_ID`，经 Nginx 分流登录 A/B，验证 Redis 跨节点单聊。
