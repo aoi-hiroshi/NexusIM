@@ -67,7 +67,7 @@ bool MySQL::connect()
     }
     else
     {
-        LOG_INFO << "connect mysql fail!";
+        LOG_ERROR << "connect mysql failed: " << mysql_error(_conn);
     }
 
     return p;

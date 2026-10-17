@@ -2,6 +2,7 @@
 #define CHATSERVICE_H
 
 #include "json.hpp"
+#include "server/concurrency/boundedexecutor.hpp"
 #include "server/model/friendmodel.hpp"
 #include "server/model/offlinemessagemodel.hpp"
 #include "server/model/usermodel.hpp"
@@ -36,9 +37,7 @@ public:
     bool isCurrentSession(const nexusim::SessionContext &session) const;
     bool invalidateSession(const nexusim::SessionContext &session);
     bool renewPresence(const nexusim::SessionContext &session);
-
-    void reset();
-    void handleRedisSubscribeMessage(int userId, std::string message);
+    const std::string &nodeId() const noexcept;
 
 private:
     ChatService();
@@ -49,8 +48,18 @@ private:
     void loginout(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
     bool bindAuthenticated(const muduo::net::TcpConnectionPtr &, int userId,
                            const std::string &userName, const std::string &sessionId);
+    muduo::net::TcpConnectionPtr localConnectionForUser(
+        int userId, const std::string *expectedSessionId = nullptr) const;
+    void enqueueRedisDelivery(nexusim::ClusterDelivery delivery);
+    void handleRedisDelivery(const nexusim::ClusterDelivery &delivery);
+    void storeOfflineOrReport(const muduo::net::TcpConnectionPtr &sender,
+                              int recipientId, const std::string &payload,
+                              const std::string &errorCode,
+                              const std::string &errorMessage);
     void sendError(const muduo::net::TcpConnectionPtr &, int requestMsgId,
-                   const std::string &code, const std::string &message) const;
+                   const std::string &code, const std::string &message,
+                   std::optional<int> recipientId = std::nullopt,
+                   std::optional<bool> queuedOffline = std::nullopt) const;
 
     std::unordered_map<int, MsgHandler> handlers_;
     std::unordered_map<int, muduo::net::TcpConnectionPtr> userConnections_;
@@ -60,9 +69,10 @@ private:
     UserModel userModel_;
     OfflineMsgModel offlineMessageModel_;
     FriendModel friendModel_;
-    Redis redis_;
     std::string nodeId_;
     int presenceTtlSeconds_;
+    nexusim::BoundedExecutor redisInboundExecutor_;
+    Redis redis_;
 };
 
 #endif

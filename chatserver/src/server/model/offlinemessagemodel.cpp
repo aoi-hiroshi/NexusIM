@@ -2,15 +2,13 @@
 #include "db.h"
 
 // 存储用户的离线消息
-void OfflineMsgModel::insert(int userid, string msg)
+bool OfflineMsgModel::insert(int userid, string msg)
 {
     MySQL mysql;
-    if (mysql.connect())
-    {
-        const string sql = "insert into `OfflineMessage`(`user_id`, `message`) values(" +
-                           std::to_string(userid) + ", '" + mysql.escape(msg) + "')";
-        mysql.update(sql);
-    }
+    if (!mysql.connect()) return false;
+    const string sql = "insert into `OfflineMessage`(`user_id`, `message`) values(" +
+                       std::to_string(userid) + ", '" + mysql.escape(msg) + "')";
+    return mysql.update(sql);
 }
 
 // 删除用户的离线消息

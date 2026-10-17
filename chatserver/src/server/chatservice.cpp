@@ -56,7 +56,8 @@ ChatService *ChatService::instance()
 
 ChatService::ChatService()
     : nodeId_(environmentOr("CHAT_NODE_ID", "chatserver-local")),
-      presenceTtlSeconds_(environmentInt("CHAT_PRESENCE_TTL_SECONDS", 90))
+      presenceTtlSeconds_(environmentInt("CHAT_PRESENCE_TTL_SECONDS", 90)),
+      redisInboundExecutor_("redis-inbound", 1, 512)
 {
     // V1 allowlist. Friend/group handlers remain compiled for later migration but
     // are deliberately unreachable over the network.
@@ -77,16 +78,16 @@ ChatService::ChatService()
                                               std::placeholders::_2,
                                               std::placeholders::_3));
 
-    if (redis_.connect())
+    redis_.initNotifyHandler([this](nexusim::ClusterDelivery delivery) {
+        enqueueRedisDelivery(std::move(delivery));
+    });
+    if (!redis_.connect(nodeId_))
     {
-        redis_.init_notify_handler(std::bind(&ChatService::handleRedisSubscribeMessage,
-                                             this, std::placeholders::_1,
-                                             std::placeholders::_2));
+        LOG_ERROR << "node=" << nodeId_
+                  << " Redis unavailable; login fails closed because Presence cannot be acquired";
     }
-    else
-    {
-        LOG_ERROR << "Redis unavailable; login fails closed because presence cannot be acquired";
-    }
+    LOG_INFO << "NexusIM ChatService initialized node=" << nodeId_
+             << " presence_ttl=" << presenceTtlSeconds_;
 }
 
 MsgHandler ChatService::getHandler(int msgid)
@@ -134,7 +135,16 @@ void ChatService::cleanupSession(const nexusim::SessionContext &session)
                                session.sessionId))
     {
         User user(session.userId, "", "", "offline");
-        userModel_.updateState(user);
+        if (!userModel_.updateState(user))
+        {
+            LOG_ERROR << "node=" << nodeId_ << " failed to persist offline state user="
+                      << session.userId;
+        }
+    }
+    else
+    {
+        LOG_WARN << "node=" << nodeId_ << " did not release Presence for user="
+                 << session.userId << "; key is stale, unavailable, or owned by a newer session";
     }
 }
 
@@ -177,6 +187,11 @@ bool ChatService::renewPresence(const nexusim::SessionContext &session)
     return session.authenticated && isCurrentSession(session) &&
            redis_.renewPresence(session.userId, nodeId_, session.connectionId,
                                 session.sessionId, presenceTtlSeconds_);
+}
+
+const std::string &ChatService::nodeId() const noexcept
+{
+    return nodeId_;
 }
 
 bool ChatService::bindAuthenticated(const muduo::net::TcpConnectionPtr &connection,
@@ -236,12 +251,23 @@ void ChatService::login(const muduo::net::TcpConnectionPtr &connection,
         return;
     }
 
-    const std::string sessionId = nexusim::generateSessionId();
-    if (!redis_.acquirePresence(id, nodeId_, connection->name(), sessionId,
-                                presenceTtlSeconds_))
+    if (!redis_.subscriptionHealthy())
     {
-        response["errno"] = 2;
-        response["errmsg"] = "account is already online or presence service is unavailable";
+        response["errno"] = 4;
+        response["errmsg"] = "cluster subscription is unavailable";
+        nexusim::sendFramed(connection, response.dump());
+        return;
+    }
+
+    const std::string sessionId = nexusim::generateSessionId();
+    const auto acquire = redis_.acquirePresence(
+        id, nodeId_, connection->name(), sessionId, presenceTtlSeconds_);
+    if (acquire != Redis::AcquireStatus::Acquired)
+    {
+        response["errno"] = acquire == Redis::AcquireStatus::AlreadyOwned ? 2 : 4;
+        response["errmsg"] = acquire == Redis::AcquireStatus::AlreadyOwned
+                                  ? "account is already online"
+                                  : "presence service is unavailable";
         nexusim::sendFramed(connection, response.dump());
         return;
     }
@@ -255,11 +281,22 @@ void ChatService::login(const muduo::net::TcpConnectionPtr &connection,
     }
 
     user.setState("online");
-    userModel_.updateState(user);
+    if (!userModel_.updateState(user))
+    {
+        const auto boundSession = sessionFor(connection);
+        if (boundSession) invalidateSession(*boundSession);
+        redis_.releasePresence(id, nodeId_, connection->name(), sessionId);
+        response["errno"] = 5;
+        response["errmsg"] = "database state update failed";
+        nexusim::sendFramed(connection, response.dump());
+        connection->shutdown();
+        return;
+    }
     response["errno"] = 0;
     response["id"] = user.getId();
     response["name"] = user.getName();
     response["session_id"] = sessionId;
+    response["node_id"] = nodeId_;
 
     std::vector<std::string> offline = offlineMessageModel_.query(id);
     if (!offline.empty())
@@ -282,6 +319,8 @@ void ChatService::login(const muduo::net::TcpConnectionPtr &connection,
         response["friends"] = encodedFriends;
     }
     nexusim::sendFramed(connection, response.dump());
+    LOG_INFO << "node=" << nodeId_ << " user=" << id
+             << " login connection=" << connection->name();
 }
 
 void ChatService::reg(const muduo::net::TcpConnectionPtr &connection,
@@ -345,27 +384,50 @@ void ChatService::oneChat(const muduo::net::TcpConnectionPtr &connection,
     request.erase("session_id");
     const std::string payload = request.dump();
 
-    muduo::net::TcpConnectionPtr localRecipient;
-    {
-        std::lock_guard<std::mutex> lock(connectionMutex_);
-        const auto iterator = userConnections_.find(recipientId);
-        if (iterator != userConnections_.end()) localRecipient = iterator->second;
-    }
+    const auto localRecipient = localConnectionForUser(recipientId);
     if (localRecipient)
     {
         nexusim::sendFramed(localRecipient, payload);
+        LOG_INFO << "node=" << nodeId_ << " direct-chat local sender="
+                 << session->userId << " recipient=" << recipientId;
+        return;
     }
-    else if (redis_.isUserPresent(recipientId))
+
+    const auto lookup = redis_.lookupPresence(recipientId);
+    if (lookup.status == Redis::LookupStatus::NotFound)
     {
-        if (!redis_.publish(recipientId, payload))
-        {
-            offlineMessageModel_.insert(recipientId, payload);
-        }
+        storeOfflineOrReport(connection, recipientId, payload, "OFFLINE_STORE_FAILED",
+                             "recipient is offline and the message could not be stored");
+        LOG_INFO << "node=" << nodeId_ << " direct-chat offline sender="
+                 << session->userId << " recipient=" << recipientId;
+        return;
     }
-    else
+    if (lookup.status == Redis::LookupStatus::Error)
     {
-        offlineMessageModel_.insert(recipientId, payload);
+        storeOfflineOrReport(connection, recipientId, payload, "PRESENCE_UNAVAILABLE",
+                             "presence lookup failed; message was not delivered in real time");
+        return;
     }
+
+    const nexusim::ClusterDelivery delivery{recipientId,
+                                             lookup.presence.sessionId,
+                                             payload};
+    const auto published = redis_.publishToNode(lookup.presence.nodeId, delivery);
+    if (published.status != Redis::PublishStatus::Published)
+    {
+        storeOfflineOrReport(connection, recipientId, payload, "REDIS_DELIVERY_FAILED",
+                             "cross-node publish failed; message was not delivered in real time");
+        return;
+    }
+    if (published.subscriberCount != 1)
+    {
+        LOG_WARN << "node=" << nodeId_ << " target_node=" << lookup.presence.nodeId
+                 << " subscriber_count=" << published.subscriberCount
+                 << " (node_id values must be unique)";
+    }
+    LOG_INFO << "node=" << nodeId_ << " direct-chat redis sender="
+             << session->userId << " recipient=" << recipientId
+             << " target_node=" << lookup.presence.nodeId;
 }
 
 void ChatService::loginout(const muduo::net::TcpConnectionPtr &connection,
@@ -381,32 +443,111 @@ void ChatService::loginout(const muduo::net::TcpConnectionPtr &connection,
     connection->shutdown();
 }
 
-void ChatService::reset()
+muduo::net::TcpConnectionPtr ChatService::localConnectionForUser(
+    int userId, const std::string *expectedSessionId) const
 {
-    userModel_.resetState();
+    std::lock_guard<std::mutex> lock(connectionMutex_);
+    const auto connection = userConnections_.find(userId);
+    if (connection == userConnections_.end()) return {};
+    const auto session = sessions_.find(connection->second->name());
+    if (session == sessions_.end() || !session->second.authenticated ||
+        session->second.userId != userId ||
+        (expectedSessionId != nullptr &&
+         session->second.sessionId != *expectedSessionId))
+    {
+        return {};
+    }
+    return connection->second;
 }
 
-void ChatService::handleRedisSubscribeMessage(int userId, std::string message)
+void ChatService::enqueueRedisDelivery(nexusim::ClusterDelivery delivery)
 {
-    muduo::net::TcpConnectionPtr connection;
+    if (!redisInboundExecutor_.trySubmit(
+            [this, delivery = std::move(delivery)] { handleRedisDelivery(delivery); }))
     {
-        std::lock_guard<std::mutex> lock(connectionMutex_);
-        const auto iterator = userConnections_.find(userId);
-        if (iterator != userConnections_.end()) connection = iterator->second;
+        LOG_ERROR << "node=" << nodeId_
+                  << " Redis inbound queue full; real-time delivery dropped";
     }
-    // Every node receives the cluster channel. Only the owner forwards it; the
-    // publisher is responsible for offline fallback on publish failure.
-    if (connection) nexusim::sendFramed(connection, message);
+}
+
+void ChatService::handleRedisDelivery(const nexusim::ClusterDelivery &delivery)
+{
+    try
+    {
+        const json payload = json::parse(delivery.payload);
+        const auto messageId = payload.find("msgid");
+        const auto recipient = payload.find("toid");
+        if (messageId == payload.end() || !messageId->is_number_integer() ||
+            messageId->get<int>() != ONE_CHAT_MSG || recipient == payload.end() ||
+            !recipient->is_number_integer() || recipient->get<int>() != delivery.recipientId)
+        {
+            LOG_ERROR << "node=" << nodeId_ << " rejected invalid Redis chat payload";
+            return;
+        }
+    }
+    catch (...)
+    {
+        LOG_ERROR << "node=" << nodeId_ << " rejected malformed Redis chat payload";
+        return;
+    }
+
+    const auto connection = localConnectionForUser(
+        delivery.recipientId, &delivery.expectedSessionId);
+    if (!connection)
+    {
+        LOG_WARN << "node=" << nodeId_ << " discarded stale Redis delivery recipient="
+                 << delivery.recipientId;
+        return;
+    }
+    nexusim::sendFramed(connection, delivery.payload);
+    LOG_INFO << "node=" << nodeId_ << " accepted Redis delivery recipient="
+             << delivery.recipientId;
+}
+
+void ChatService::storeOfflineOrReport(
+    const muduo::net::TcpConnectionPtr &sender, int recipientId,
+    const std::string &payload, const std::string &errorCode,
+    const std::string &errorMessage)
+{
+    bool recipientCheckSucceeded = false;
+    if (!userModel_.exists(recipientId, recipientCheckSucceeded))
+    {
+        sendError(sender, ONE_CHAT_MSG,
+                  recipientCheckSucceeded ? "RECIPIENT_NOT_FOUND"
+                                          : "RECIPIENT_CHECK_FAILED",
+                  recipientCheckSucceeded ? "recipient does not exist"
+                                          : "recipient could not be validated",
+                  recipientId, false);
+        return;
+    }
+    const bool stored = offlineMessageModel_.insert(recipientId, payload);
+    if (!stored)
+    {
+        sendError(sender, ONE_CHAT_MSG, "OFFLINE_STORE_FAILED",
+                  "message was neither delivered nor stored", recipientId, false);
+        LOG_ERROR << "node=" << nodeId_ << " failed to store offline message recipient="
+                  << recipientId;
+        return;
+    }
+    if (errorCode != "OFFLINE_STORE_FAILED")
+    {
+        sendError(sender, ONE_CHAT_MSG, errorCode, errorMessage, recipientId, true);
+    }
 }
 
 void ChatService::sendError(const muduo::net::TcpConnectionPtr &connection,
                             int requestMsgId, const std::string &code,
-                            const std::string &message) const
+                            const std::string &message,
+                            std::optional<int> recipientId,
+                            std::optional<bool> queuedOffline) const
 {
     json response;
     response["msgid"] = ERROR_MSG;
     response["request_msgid"] = requestMsgId;
     response["error"] = code;
     response["errmsg"] = message;
+    response["node_id"] = nodeId_;
+    if (recipientId) response["toid"] = *recipientId;
+    if (queuedOffline) response["queued_offline"] = *queuedOffline;
     nexusim::sendFramed(connection, response.dump());
 }

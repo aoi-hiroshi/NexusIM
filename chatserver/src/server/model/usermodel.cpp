@@ -53,6 +53,23 @@ User UserModel::query(int id)
     return User();
 }
 
+bool UserModel::exists(int id, bool &querySucceeded)
+{
+    querySucceeded = false;
+    if (id <= 0) return false;
+
+    MySQL mysql;
+    if (!mysql.connect()) return false;
+    const string sql = "select 1 from `User` where id = " +
+                       std::to_string(id) + " limit 1";
+    MYSQL_RES *res = mysql.query(sql);
+    if (res == nullptr) return false;
+    const bool found = mysql_fetch_row(res) != nullptr;
+    querySucceeded = found || mysql_errno(mysql.getConnection()) == 0;
+    mysql_free_result(res);
+    return found;
+}
+
 // 更新用户的状态信息
 bool UserModel::updateState(User user)
 {

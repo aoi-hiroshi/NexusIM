@@ -2,7 +2,8 @@
 
 NexusIM 是基于施磊课程 ChatServer 与 MPRPC 示例代码演进的 C++17 分布式即时通信项目。
 
-当前仓库已完成 **阶段 1：协议、安全与并发基线**。Qt UI、UserService RPC 拆分和 AIService 尚未开发。
+当前仓库已完成 **阶段 2：Redis Pub/Sub + Nginx 双节点集群源码与部署准备**。
+Qt UI、UserService RPC 拆分和 AIService 尚未开发；Linux 真实集群结果仍需在目标机验收。
 
 ## 当前目录
 
@@ -12,6 +13,8 @@ NexusIM 是基于施磊课程 ChatServer 与 MPRPC 示例代码演进的 C++17 �
 - `docs/concurrency-presence-design.md`：异步 RPC、连接顺序和 Redis Presence 的强制设计规则。
 - `docs/linux-build-checklist.md`：后续 Linux 编译与依赖核查命令。
 - `docs/stage1-implementation.md`：阶段 1 设计、实际测试结果与 Linux 验收步骤。
+- `docs/stage2-cluster.md`：阶段 2 路由、部署、可靠性边界与可复现验收步骤。
+- `deploy/`：双实例环境模板、Redis 模板、Nginx stream 配置与启动脚本。
 
 ## V1 边界
 
@@ -23,4 +26,6 @@ V1 不承诺 ACK 可靠投递、多设备同步、复杂历史、RPC 多实例�
 
 ## 构建状态
 
-阶段 1 的平台无关核心测试已在 VS2019 下真实通过；本机没有 WSL/Muduo/MySQL/hiredis Linux 环境，Linux 服务端尚未在本机链接。真实边界和目标机命令见 `docs/stage1-implementation.md`。
+平台无关核心测试在 VS2019 下执行；本机没有 WSL/Muduo/MySQL/hiredis Linux 环境，
+Linux 服务端和真实 Redis/Nginx 集群必须在目标机验证。命令及真实边界见
+`docs/stage1-implementation.md` 和 `docs/stage2-cluster.md`。

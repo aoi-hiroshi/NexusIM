@@ -1,5 +1,6 @@
 # Build outputs
 build/
+/out/
 cmake-build-*/
 .phase0-build/
 CMakeFiles/

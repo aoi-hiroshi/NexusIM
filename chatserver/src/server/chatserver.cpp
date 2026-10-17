@@ -40,11 +40,15 @@ void ChatServer::onConnection(const muduo::net::TcpConnectionPtr &connection)
     if (connection->connected())
     {
         service_->connectionOpened(connection);
+        LOG_INFO << "node=" << service_->nodeId() << " connection="
+                 << connection->name() << " connected";
         return;
     }
 
     const auto session = service_->detachConnection(connection);
     businessStrand_.cancel(connection->name());
+    LOG_INFO << "node=" << service_->nodeId() << " connection="
+             << connection->name() << " disconnected";
     if (session)
     {
         pendingRequests_.cancelConnection(session->connectionId, session->sessionId);

@@ -361,8 +361,13 @@ void readTaskHandler(int clientfd)
             sem_post(&rwsem);    // 通知主线程，注册结果处理完成
             return;
         }
-        if (HEARTBEAT_MSG_ACK == msgtype || ERROR_MSG == msgtype)
+        if (HEARTBEAT_MSG_ACK == msgtype)
         {
+            return;
+        }
+        if (ERROR_MSG == msgtype)
+        {
+            cerr << "server error: " << js.dump() << endl;
             return;
         }
         });
