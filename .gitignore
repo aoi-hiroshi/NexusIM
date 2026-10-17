@@ -1,0 +1,45 @@
+# Build outputs
+build/
+cmake-build-*/
+.phase0-build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.sln
+*.vcxproj
+*.vcxproj.filters
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dll
+*.exe
+*.out
+*.pdb
+
+# Runtime data and logs
+*.log
+*-log.txt
+logs/
+data/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+config/local/
+*.key
+*.pem
+
+# IDE and OS files
+.idea/
+.vscode/
+.vs/
+*.user
+.DS_Store
+Thumbs.db
