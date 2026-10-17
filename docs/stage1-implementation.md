@@ -52,6 +52,8 @@ Windows 开发机没有 WSL/Muduo/MySQL/hiredis Linux 开发环境；Linux 结�
 - 随后构建暴露 `main.cpp` 依赖旧头文件全局 namespace 的错误，已由提交 `aedcd2f` 改成显式 `muduo::net::EventLoop/InetAddress`。
 - ChatServer 可在 `127.0.0.1:6000` 启动，`server_frame_probe.py` 实际输出 `server_frame_probe: PASS`。
 - 探针建立的四个短连接分别覆盖逐字节半包、粘包双帧、零长度非法帧和超限非法帧；服务端日志中的四次连接移除符合预期。
+- 初次以 `Aoi_@localhost` 访问新库得到 MySQL 1044；授予该账户 `nexusim.*` 运行时 CRUD 权限后，`auth_probe.py` 连续两次通过，创建用户 id 2 和 3。
+- 两次注册响应均为 `msgid=5, errno=0`，随后登录响应均为 `msgid=2, errno=0` 且返回 64 字符 session ID。数据库实查两个新密码均以 `pbkdf2_sha256$120000` 开头，连接关闭后状态均为 `offline`。
 
 尚未据此宣称通过：MySQL 注册/登录、密码迁移、认证身份覆盖、Presence 续租/安全删除、跨节点单聊和 Redis 故障恢复。
 
@@ -74,6 +76,8 @@ mysql -u Aoi_ -p < chatserver/sql/002_clone_chat_to_nexusim.sql
 ```bash
 python3 tests/stage1/server_frame_probe.py --host 127.0.0.1 --port 6000
 python3 tests/stage1/auth_probe.py --host 127.0.0.1 --port 6000
+python3 tests/stage1/existing_login_probe.py --host 127.0.0.1 --port 6000 --user-id 1
+python3 tests/stage1/session_security_probe.py --host 127.0.0.1 --port 6000
 ```
 
 集成验收还必须人工或自动记录：

@@ -21,6 +21,8 @@ Makefile
 *.exe
 *.out
 *.pdb
+__pycache__/
+*.py[cod]
 
 # Runtime data and logs
 *.log
