@@ -41,7 +41,19 @@ V1 没有 TLS，只允许部署在隔离测试网络，禁止把 Nginx、ChatSer
 
 另使用本机 MSYS2 UCRT64 GCC 与 OpenSSL 编译运行 `stage1_security_tests`，结果通过；覆盖随机盐导致相同密码产生不同哈希、正确/错误密码验证、畸形哈希安全失败、256-bit session ID 长度与非复用。该测试在 Linux 可通过 `NEXUSIM_BUILD_SECURITY_TESTS=ON` 纳入 CTest。
 
-本机没有 WSL/Muduo/MySQL/hiredis Linux 开发环境，因此没有声称 ChatServer Linux 链接或 Redis/MySQL 集成已经通过。下面的测试必须在目标 Linux 重跑并记录输出。
+Windows 开发机没有 WSL/Muduo/MySQL/hiredis Linux 开发环境；Linux 结果单独按目标机真实输出记录，不用 Windows 结果替代。
+
+## Linux 实际测试记录（2026-10-18，北京时间）
+
+目标机日志显示 GCC 15.2.0、OpenSSL 3.5.5。以下结果已经实际获得：
+
+- `stage1_core_tests` 与 `stage1_security_tests`：2/2 通过，总计 0.20 秒（此数字仅是本次测试运行时间，不作为性能指标）。
+- 首次 ChatServer 构建因缺少 `hiredis/hiredis.h` 失败；安装 hiredis 开发包后该错误消失。
+- 随后构建暴露 `main.cpp` 依赖旧头文件全局 namespace 的错误，已由提交 `aedcd2f` 改成显式 `muduo::net::EventLoop/InetAddress`。
+- ChatServer 可在 `127.0.0.1:6000` 启动，`server_frame_probe.py` 实际输出 `server_frame_probe: PASS`。
+- 探针建立的四个短连接分别覆盖逐字节半包、粘包双帧、零长度非法帧和超限非法帧；服务端日志中的四次连接移除符合预期。
+
+尚未据此宣称通过：MySQL 注册/登录、密码迁移、认证身份覆盖、Presence 续租/安全删除、跨节点单聊和 Redis 故障恢复。
 
 ## Linux 构建与验证
 
@@ -52,7 +64,7 @@ ctest --test-dir build/stage1-tests --output-on-failure
 
 cmake -S chatserver -B build/chatserver -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/chatserver -j
-mysql -u root -p chat < chatserver/sql/001_stage1_security.sql
+mysql -u Aoi_ -p chat < chatserver/sql/001_stage1_security.sql
 ```
 
 按 `chatserver/.env.example` 设置环境变量，但不要提交实际密码。先启动 MySQL/Redis，再启动 ChatServer，执行：
@@ -63,7 +75,7 @@ python3 tests/stage1/server_frame_probe.py --host 127.0.0.1 --port 6000
 
 集成验收还必须人工或自动记录：
 
-1. 注册后确认 `user.password` 是 `pbkdf2_sha256$...`，不是原密码；包含单引号的用户名和消息不改变 SQL 结构。
+1. 注册后确认 `User.password` 是 `pbkdf2_sha256$...`，不是原密码；包含单引号的用户名和消息不改变 SQL 结构。
 2. 两个连接登录 A/B，A 发送伪造的 `id/name`，B 收到的发送者仍是 A 的认证身份。
 3. 用代理延迟 MySQL/Redis 请求时，另一个连接仍能收到协议错误/业务响应；EventLoop 线程栈中不出现同步数据库、Redis 或 RPC 调用。
 4. 两个 ChatServer 设置不同 `CHAT_NODE_ID`，经 Nginx 分流登录 A/B，验证 Redis 跨节点单聊。
