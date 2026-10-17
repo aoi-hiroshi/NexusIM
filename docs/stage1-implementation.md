@@ -67,7 +67,7 @@ cmake --build build/chatserver -j
 mysql -u Aoi_ -p < chatserver/sql/002_clone_chat_to_nexusim.sql
 ```
 
-`002_clone_chat_to_nexusim.sql` 新建独立的 `nexusim` 数据库并从旧 `chat` 复制五张表，不会修改或删除 `chat`。目标表只要有任意数据，脚本就中止，避免重复迁移产生重复行。若 `Aoi_` 没有创建数据库的权限，应由数据库管理员执行脚本，再查询 `mysql.user` 中 `Aoi_` 的实际 `Host` 并为该账户授予 `nexusim.*` 的运行权限。不要凭空假设账户 Host 为 `localhost` 或 `%`。
+`002_clone_chat_to_nexusim.sql` 新建独立的 `nexusim` 数据库并从旧 `chat` 复制五张表，不会修改或删除 `chat`。目标表只要有任意数据，脚本就中止，避免重复迁移产生重复行。迁移后仅在新库把 `OfflineMessage` 改为自增 `id` 主键、`user_id` 普通索引和 `MEDIUMTEXT message`，从而支持同一用户的多条离线消息。若 `Aoi_` 没有创建数据库的权限，应由数据库管理员执行脚本，再查询 `mysql.user` 中 `Aoi_` 的实际 `Host` 并为该账户授予 `nexusim.*` 的运行权限。不要凭空假设账户 Host 为 `localhost` 或 `%`。
 
 按 `chatserver/.env.example` 设置环境变量（特别是 `CHAT_DB_NAME=nexusim`），但不要提交实际密码。先启动 MySQL/Redis，再启动 ChatServer，执行：
 

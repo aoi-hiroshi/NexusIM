@@ -7,7 +7,7 @@ void OfflineMsgModel::insert(int userid, string msg)
     MySQL mysql;
     if (mysql.connect())
     {
-        const string sql = "insert into `OfflineMessage`(userid, message) values(" +
+        const string sql = "insert into `OfflineMessage`(`user_id`, `message`) values(" +
                            std::to_string(userid) + ", '" + mysql.escape(msg) + "')";
         mysql.update(sql);
     }
@@ -18,7 +18,7 @@ void OfflineMsgModel::remove(int userid)
 {
     // 1.组装sql语句
     char sql[1024] = {0};
-    sprintf(sql, "delete from `OfflineMessage` where userid=%d", userid);
+    sprintf(sql, "delete from `OfflineMessage` where `user_id`=%d", userid);
 
     MySQL mysql;
     if (mysql.connect())
@@ -32,7 +32,7 @@ vector<string> OfflineMsgModel::query(int userid)
 {
     // 1.组装sql语句
     char sql[1024] = {0};
-    sprintf(sql, "select message from `OfflineMessage` where userid = %d", userid);
+    sprintf(sql, "select `message` from `OfflineMessage` where `user_id` = %d order by `id`", userid);
 
     vector<string> vec;
     MySQL mysql;

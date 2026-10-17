@@ -64,6 +64,15 @@ DELIMITER ;
 CALL `nexusim`.`clone_chat_data_once`();
 DROP PROCEDURE `nexusim`.`clone_chat_data_once`;
 
+-- The legacy schema makes user_id the primary key, which permits only one
+-- offline message per user. NexusIM needs multiple ordered offline messages.
+ALTER TABLE `nexusim`.`OfflineMessage`
+    DROP PRIMARY KEY,
+    ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT FIRST,
+    ADD PRIMARY KEY (`id`),
+    ADD INDEX `idx_offline_message_user_id` (`user_id`),
+    MODIFY COLUMN `message` MEDIUMTEXT NOT NULL;
+
 SELECT 'chat.User' AS source_table, COUNT(*) AS row_count FROM `chat`.`User`
 UNION ALL
 SELECT 'nexusim.User', COUNT(*) FROM `nexusim`.`User`

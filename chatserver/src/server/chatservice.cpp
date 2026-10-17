@@ -290,10 +290,10 @@ void ChatService::reg(const muduo::net::TcpConnectionPtr &connection,
     std::string name;
     std::string password;
     if (!stringField(request, "name", name) || !stringField(request, "password", password) ||
-        name.empty() || name.size() > 64 || password.size() < 8 || password.size() > 128)
+        name.empty() || name.size() > 50 || password.size() < 8 || password.size() > 128)
     {
         sendError(connection, REG_MSG, "INVALID_ARGUMENT",
-                  "name is required and password must contain 8-128 bytes");
+                  "name must contain 1-50 bytes and password must contain 8-128 bytes");
         return;
     }
     const auto session = sessionFor(connection);
