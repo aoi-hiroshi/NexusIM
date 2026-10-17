@@ -79,6 +79,7 @@ python3 tests/stage1/server_frame_probe.py --host 127.0.0.1 --port 6000
 python3 tests/stage1/auth_probe.py --host 127.0.0.1 --port 6000
 python3 tests/stage1/existing_login_probe.py --host 127.0.0.1 --port 6000 --user-id 1
 python3 tests/stage1/session_security_probe.py --host 127.0.0.1 --port 6000
+python3 tests/stage1/presence_probe.py --host 127.0.0.1 --port 6000 --user-id 1
 ```
 
 集成验收还必须人工或自动记录：
