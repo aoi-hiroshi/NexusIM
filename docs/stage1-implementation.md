@@ -55,6 +55,7 @@ Windows 开发机没有 WSL/Muduo/MySQL/hiredis Linux 开发环境；Linux 结�
 - 初次以 `Aoi_@localhost` 访问新库得到 MySQL 1044；授予该账户 `nexusim.*` 运行时 CRUD 权限后，`auth_probe.py` 连续两次通过，创建用户 id 2 和 3。
 - 两次注册响应均为 `msgid=5, errno=0`，随后登录响应均为 `msgid=2, errno=0` 且返回 64 字符 session ID。数据库实查两个新密码均以 `pbkdf2_sha256$120000` 开头，连接关闭后状态均为 `offline`。
 - `session_security_probe.py` 实际通过：未认证心跳和禁用接口检查成功；认证心跳返回 `msgid=12, ok=true`；用户 5 向用户 4 发送包含伪造身份的消息后，接收方看到的仍是服务端认证的用户 5 及其真实用户名，且消息中没有 `session_id`。
+- `presence_probe.py` 使用用户 1 实际通过：登录获得 64 字符 session ID；Presence 初始 TTL 为 90 秒，等待后为 88 秒，认证心跳后恢复为 90 秒；错误 owner 的 compare-delete 返回 0，连接关闭后当前 Presence key 被安全删除。
 
 尚未据此宣称通过：MySQL 注册/登录、密码迁移、认证身份覆盖、Presence 续租/安全删除、跨节点单聊和 Redis 故障恢复。
 
