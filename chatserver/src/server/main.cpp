@@ -1,5 +1,7 @@
 #include "chatserver.hpp"
 #include "chatservice.hpp"
+#include <cstdint>
+#include <cstdlib>
 #include <iostream>
 using namespace std;
 
@@ -15,8 +17,8 @@ int main(int argc, char **argv)
     char *ip = argv[1];
     uint16_t port = atoi(argv[2]);
 
-    EventLoop loop;
-    InetAddress addr(ip, port);
+    muduo::net::EventLoop loop;
+    muduo::net::InetAddress addr(ip, port);
     ChatServer server(&loop, addr, "ChatServer");
 
     server.start();
