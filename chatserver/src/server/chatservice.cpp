@@ -1,357 +1,412 @@
-#include "chatservice.hpp"
-#include "public.hpp"
-#include <muduo/base/Logging.h>
-#include <vector>
-using namespace std;
-using namespace muduo;
+#include "server/chatservice.hpp"
 
-// 获取单例对象的接口函数
+#include "public.hpp"
+#include "server/security/passwordhasher.hpp"
+#include "server/wireprotocol.hpp"
+
+#include <muduo/base/Logging.h>
+
+#include <cstdlib>
+#include <utility>
+#include <vector>
+
+namespace
+{
+std::string environmentOr(const char *name, const char *fallback)
+{
+    const char *value = std::getenv(name);
+    return value == nullptr || *value == '\0' ? std::string(fallback) : std::string(value);
+}
+
+int environmentInt(const char *name, int fallback)
+{
+    try
+    {
+        const std::string fallbackText = std::to_string(fallback);
+        return std::stoi(environmentOr(name, fallbackText.c_str()));
+    }
+    catch (...)
+    {
+        return fallback;
+    }
+}
+
+bool stringField(const json &value, const char *name, std::string &result)
+{
+    const auto it = value.find(name);
+    if (it == value.end() || !it->is_string()) return false;
+    result = it->get<std::string>();
+    return true;
+}
+
+bool intField(const json &value, const char *name, int &result)
+{
+    const auto it = value.find(name);
+    if (it == value.end() || !it->is_number_integer()) return false;
+    result = it->get<int>();
+    return true;
+}
+} // namespace
+
 ChatService *ChatService::instance()
 {
     static ChatService service;
     return &service;
 }
 
-// 注册消息以及对应的Handler回调操作
 ChatService::ChatService()
+    : nodeId_(environmentOr("CHAT_NODE_ID", "chatserver-local")),
+      presenceTtlSeconds_(environmentInt("CHAT_PRESENCE_TTL_SECONDS", 90))
 {
-    // 用户基本业务管理相关事件处理回调注册
-    _msgHandlerMap.insert({LOGIN_MSG, std::bind(&ChatService::login, this, _1, _2, _3)});
-    _msgHandlerMap.insert({LOGINOUT_MSG, std::bind(&ChatService::loginout, this, _1, _2, _3)});
-    _msgHandlerMap.insert({REG_MSG, std::bind(&ChatService::reg, this, _1, _2, _3)});
-    _msgHandlerMap.insert({ONE_CHAT_MSG, std::bind(&ChatService::oneChat, this, _1, _2, _3)});
-    _msgHandlerMap.insert({ADD_FRIEND_MSG, std::bind(&ChatService::addFriend, this, _1, _2, _3)});
+    // V1 allowlist. Friend/group handlers remain compiled for later migration but
+    // are deliberately unreachable over the network.
+    handlers_.emplace(LOGIN_MSG, std::bind(&ChatService::login, this,
+                                           std::placeholders::_1,
+                                           std::placeholders::_2,
+                                           std::placeholders::_3));
+    handlers_.emplace(REG_MSG, std::bind(&ChatService::reg, this,
+                                         std::placeholders::_1,
+                                         std::placeholders::_2,
+                                         std::placeholders::_3));
+    handlers_.emplace(ONE_CHAT_MSG, std::bind(&ChatService::oneChat, this,
+                                              std::placeholders::_1,
+                                              std::placeholders::_2,
+                                              std::placeholders::_3));
+    handlers_.emplace(LOGINOUT_MSG, std::bind(&ChatService::loginout, this,
+                                              std::placeholders::_1,
+                                              std::placeholders::_2,
+                                              std::placeholders::_3));
 
-    // 群组业务管理相关事件处理回调注册
-    _msgHandlerMap.insert({CREATE_GROUP_MSG, std::bind(&ChatService::createGroup, this, _1, _2, _3)});
-    _msgHandlerMap.insert({ADD_GROUP_MSG, std::bind(&ChatService::addGroup, this, _1, _2, _3)});
-    _msgHandlerMap.insert({GROUP_CHAT_MSG, std::bind(&ChatService::groupChat, this, _1, _2, _3)});
-
-    // 连接redis服务器
-    if (_redis.connect())
+    if (redis_.connect())
     {
-        // 设置上报消息的回调
-        _redis.init_notify_handler(std::bind(&ChatService::handleRedisSubscribeMessage, this, _1, _2));
+        redis_.init_notify_handler(std::bind(&ChatService::handleRedisSubscribeMessage,
+                                             this, std::placeholders::_1,
+                                             std::placeholders::_2));
+    }
+    else
+    {
+        LOG_ERROR << "Redis unavailable; login fails closed because presence cannot be acquired";
     }
 }
 
-// 服务器异常，业务重置方法
-void ChatService::reset()
-{
-    // 把online状态的用户，设置成offline
-    _userModel.resetState();
-}
-
-// 获取消息对应的处理器
 MsgHandler ChatService::getHandler(int msgid)
 {
-    // 记录错误日志，msgid没有对应的事件处理回调
-    auto it = _msgHandlerMap.find(msgid);
-    if (it == _msgHandlerMap.end())
+    const auto iterator = handlers_.find(msgid);
+    if (iterator != handlers_.end()) return iterator->second;
+    return [this, msgid](const muduo::net::TcpConnectionPtr &connection,
+                         json &, muduo::Timestamp) {
+        sendError(connection, msgid, "FEATURE_DISABLED",
+                  "message type is not enabled in NexusIM V1");
+    };
+}
+
+void ChatService::connectionOpened(const muduo::net::TcpConnectionPtr &connection)
+{
+    nexusim::SessionContext context;
+    context.connectionId = connection->name();
+    std::lock_guard<std::mutex> lock(connectionMutex_);
+    sessions_[context.connectionId] = std::move(context);
+}
+
+std::optional<nexusim::SessionContext> ChatService::detachConnection(
+    const muduo::net::TcpConnectionPtr &connection)
+{
+    std::lock_guard<std::mutex> lock(connectionMutex_);
+    const auto iterator = sessions_.find(connection->name());
+    if (iterator == sessions_.end()) return std::nullopt;
+    const nexusim::SessionContext result = iterator->second;
+    if (result.authenticated)
     {
-        // 返回一个默认的处理器，空操作
-        return [=](const TcpConnectionPtr &conn, json &js, Timestamp) {
-            LOG_ERROR << "msgid:" << msgid << " can not find handler!";
-        };
+        const auto user = userConnections_.find(result.userId);
+        if (user != userConnections_.end() && user->second == connection)
+        {
+            userConnections_.erase(user);
+        }
     }
-    else
+    sessions_.erase(iterator);
+    return result;
+}
+
+void ChatService::cleanupSession(const nexusim::SessionContext &session)
+{
+    if (!session.authenticated) return;
+    if (redis_.releasePresence(session.userId, nodeId_, session.connectionId,
+                               session.sessionId))
     {
-        return _msgHandlerMap[msgid];
+        User user(session.userId, "", "", "offline");
+        userModel_.updateState(user);
     }
 }
 
-// 处理登录业务  id  pwd   pwd
-void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
+std::optional<nexusim::SessionContext> ChatService::sessionFor(
+    const muduo::net::TcpConnectionPtr &connection) const
 {
-    int id = js["id"].get<int>();
-    string pwd = js["password"];
+    std::lock_guard<std::mutex> lock(connectionMutex_);
+    const auto iterator = sessions_.find(connection->name());
+    if (iterator == sessions_.end()) return std::nullopt;
+    return iterator->second;
+}
 
-    User user = _userModel.query(id);
-    if (user.getId() == id && user.getPwd() == pwd)
+bool ChatService::isCurrentSession(const nexusim::SessionContext &session) const
+{
+    std::lock_guard<std::mutex> lock(connectionMutex_);
+    const auto iterator = sessions_.find(session.connectionId);
+    return iterator != sessions_.end() && iterator->second.authenticated &&
+           iterator->second.userId == session.userId &&
+           iterator->second.sessionId == session.sessionId;
+}
+
+bool ChatService::invalidateSession(const nexusim::SessionContext &session)
+{
+    std::lock_guard<std::mutex> lock(connectionMutex_);
+    const auto iterator = sessions_.find(session.connectionId);
+    if (iterator == sessions_.end() || !iterator->second.authenticated ||
+        iterator->second.userId != session.userId ||
+        iterator->second.sessionId != session.sessionId)
     {
-        if (user.getState() == "online")
-        {
-            // 该用户已经登录，不允许重复登录
-            json response;
-            response["msgid"] = LOGIN_MSG_ACK;
-            response["errno"] = 2;
-            response["errmsg"] = "this account is using, input another!";
-            conn->send(response.dump());
-        }
-        else
-        {
-            // 登录成功，记录用户连接信息
-            {
-                lock_guard<mutex> lock(_connMutex);
-                _userConnMap.insert({id, conn});
-            }
-
-            // id用户登录成功后，向redis订阅channel(id)
-            _redis.subscribe(id); 
-
-            // 登录成功，更新用户状态信息 state offline=>online
-            user.setState("online");
-            _userModel.updateState(user);
-
-            json response;
-            response["msgid"] = LOGIN_MSG_ACK;
-            response["errno"] = 0;
-            response["id"] = user.getId();
-            response["name"] = user.getName();
-            // 查询该用户是否有离线消息
-            vector<string> vec = _offlineMsgModel.query(id);
-            if (!vec.empty())
-            {
-                response["offlinemsg"] = vec;
-                // 读取该用户的离线消息后，把该用户的所有离线消息删除掉
-                _offlineMsgModel.remove(id);
-            }
-
-            // 查询该用户的好友信息并返回
-            vector<User> userVec = _friendModel.query(id);
-            if (!userVec.empty())
-            {
-                vector<string> vec2;
-                for (User &user : userVec)
-                {
-                    json js;
-                    js["id"] = user.getId();
-                    js["name"] = user.getName();
-                    js["state"] = user.getState();
-                    vec2.push_back(js.dump());
-                }
-                response["friends"] = vec2;
-            }
-
-            // 查询用户的群组信息
-            vector<Group> groupuserVec = _groupModel.queryGroups(id);
-            if (!groupuserVec.empty())
-            {
-                // group:[{groupid:[xxx, xxx, xxx, xxx]}]
-                vector<string> groupV;
-                for (Group &group : groupuserVec)
-                {
-                    json grpjson;
-                    grpjson["id"] = group.getId();
-                    grpjson["groupname"] = group.getName();
-                    grpjson["groupdesc"] = group.getDesc();
-                    vector<string> userV;
-                    for (GroupUser &user : group.getUsers())
-                    {
-                        json js;
-                        js["id"] = user.getId();
-                        js["name"] = user.getName();
-                        js["state"] = user.getState();
-                        js["role"] = user.getRole();
-                        userV.push_back(js.dump());
-                    }
-                    grpjson["users"] = userV;
-                    groupV.push_back(grpjson.dump());
-                }
-
-                response["groups"] = groupV;
-            }
-
-            conn->send(response.dump());
-        }
+        return false;
     }
-    else
+    const auto user = userConnections_.find(session.userId);
+    if (user != userConnections_.end()) userConnections_.erase(user);
+    sessions_.erase(iterator);
+    return true;
+}
+
+bool ChatService::renewPresence(const nexusim::SessionContext &session)
+{
+    return session.authenticated && isCurrentSession(session) &&
+           redis_.renewPresence(session.userId, nodeId_, session.connectionId,
+                                session.sessionId, presenceTtlSeconds_);
+}
+
+bool ChatService::bindAuthenticated(const muduo::net::TcpConnectionPtr &connection,
+                                    int userId, const std::string &userName,
+                                    const std::string &sessionId)
+{
+    std::lock_guard<std::mutex> lock(connectionMutex_);
+    const auto session = sessions_.find(connection->name());
+    if (session == sessions_.end() || session->second.authenticated ||
+        userConnections_.find(userId) != userConnections_.end())
     {
-        // 该用户不存在，用户存在但是密码错误，登录失败
-        json response;
-        response["msgid"] = LOGIN_MSG_ACK;
+        return false;
+    }
+    session->second.authenticated = true;
+    session->second.userId = userId;
+    session->second.userName = userName;
+    session->second.sessionId = sessionId;
+    userConnections_[userId] = connection;
+    return true;
+}
+
+void ChatService::login(const muduo::net::TcpConnectionPtr &connection,
+                        json &request, muduo::Timestamp)
+{
+    int id = -1;
+    std::string password;
+    if (!intField(request, "id", id) || !stringField(request, "password", password) ||
+        id <= 0 || password.empty() || password.size() > 256)
+    {
+        sendError(connection, LOGIN_MSG, "INVALID_ARGUMENT", "invalid id or password");
+        return;
+    }
+    const auto existing = sessionFor(connection);
+    if (!existing || existing->authenticated)
+    {
+        sendError(connection, LOGIN_MSG, "INVALID_STATE", "connection is not eligible to login");
+        return;
+    }
+
+    User user = userModel_.query(id);
+    bool passwordMatches = user.getId() == id &&
+                           nexusim::PasswordHasher::verify(password, user.getPwd());
+    if (!passwordMatches && user.getId() == id &&
+        !nexusim::PasswordHasher::isEncoded(user.getPwd()) && user.getPwd() == password)
+    {
+        const std::string migrated = nexusim::PasswordHasher::hash(password);
+        passwordMatches = userModel_.updatePassword(id, migrated);
+    }
+
+    json response;
+    response["msgid"] = LOGIN_MSG_ACK;
+    if (!passwordMatches)
+    {
         response["errno"] = 1;
-        response["errmsg"] = "id or password is invalid!";
-        conn->send(response.dump());
+        response["errmsg"] = "id or password is invalid";
+        nexusim::sendFramed(connection, response.dump());
+        return;
     }
+
+    const std::string sessionId = nexusim::generateSessionId();
+    if (!redis_.acquirePresence(id, nodeId_, connection->name(), sessionId,
+                                presenceTtlSeconds_))
+    {
+        response["errno"] = 2;
+        response["errmsg"] = "account is already online or presence service is unavailable";
+        nexusim::sendFramed(connection, response.dump());
+        return;
+    }
+    if (!bindAuthenticated(connection, id, user.getName(), sessionId))
+    {
+        redis_.releasePresence(id, nodeId_, connection->name(), sessionId);
+        response["errno"] = 3;
+        response["errmsg"] = "connection closed or login state changed";
+        nexusim::sendFramed(connection, response.dump());
+        return;
+    }
+
+    user.setState("online");
+    userModel_.updateState(user);
+    response["errno"] = 0;
+    response["id"] = user.getId();
+    response["name"] = user.getName();
+    response["session_id"] = sessionId;
+
+    std::vector<std::string> offline = offlineMessageModel_.query(id);
+    if (!offline.empty())
+    {
+        response["offlinemsg"] = offline;
+        offlineMessageModel_.remove(id);
+    }
+    std::vector<User> friends = friendModel_.query(id);
+    if (!friends.empty())
+    {
+        std::vector<std::string> encodedFriends;
+        for (User &friendUser : friends)
+        {
+            json value;
+            value["id"] = friendUser.getId();
+            value["name"] = friendUser.getName();
+            value["state"] = friendUser.getState();
+            encodedFriends.push_back(value.dump());
+        }
+        response["friends"] = encodedFriends;
+    }
+    nexusim::sendFramed(connection, response.dump());
 }
 
-// 处理注册业务  name  password
-void ChatService::reg(const TcpConnectionPtr &conn, json &js, Timestamp time)
+void ChatService::reg(const muduo::net::TcpConnectionPtr &connection,
+                      json &request, muduo::Timestamp)
 {
-    string name = js["name"];
-    string pwd = js["password"];
+    std::string name;
+    std::string password;
+    if (!stringField(request, "name", name) || !stringField(request, "password", password) ||
+        name.empty() || name.size() > 64 || password.size() < 8 || password.size() > 128)
+    {
+        sendError(connection, REG_MSG, "INVALID_ARGUMENT",
+                  "name is required and password must contain 8-128 bytes");
+        return;
+    }
+    const auto session = sessionFor(connection);
+    if (!session || session->authenticated)
+    {
+        sendError(connection, REG_MSG, "INVALID_STATE", "register requires an unauthenticated connection");
+        return;
+    }
 
     User user;
     user.setName(name);
-    user.setPwd(pwd);
-    bool state = _userModel.insert(user);
-    if (state)
+    user.setPwd(nexusim::PasswordHasher::hash(password));
+    json response;
+    response["msgid"] = REG_MSG_ACK;
+    if (userModel_.insert(user))
     {
-        // 注册成功
-        json response;
-        response["msgid"] = REG_MSG_ACK;
         response["errno"] = 0;
         response["id"] = user.getId();
-        conn->send(response.dump());
     }
     else
     {
-        // 注册失败
-        json response;
-        response["msgid"] = REG_MSG_ACK;
         response["errno"] = 1;
-        conn->send(response.dump());
+        response["errmsg"] = "registration failed";
     }
+    nexusim::sendFramed(connection, response.dump());
 }
 
-// 处理注销业务
-void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp time)
+void ChatService::oneChat(const muduo::net::TcpConnectionPtr &connection,
+                          json &request, muduo::Timestamp)
 {
-    int userid = js["id"].get<int>();
-
+    const auto session = sessionFor(connection);
+    int recipientId = -1;
+    std::string message;
+    if (!session || !session->authenticated)
     {
-        lock_guard<mutex> lock(_connMutex);
-        auto it = _userConnMap.find(userid);
-        if (it != _userConnMap.end())
-        {
-            _userConnMap.erase(it);
-        }
+        sendError(connection, ONE_CHAT_MSG, "UNAUTHENTICATED", "login is required");
+        return;
     }
-
-    // 用户注销，相当于就是下线，在redis中取消订阅通道
-    _redis.unsubscribe(userid); 
-
-    // 更新用户的状态信息
-    User user(userid, "", "", "offline");
-    _userModel.updateState(user);
-}
-
-// 处理客户端异常退出
-void ChatService::clientCloseException(const TcpConnectionPtr &conn)
-{
-    User user;
+    if (!intField(request, "toid", recipientId) || recipientId <= 0 ||
+        !stringField(request, "msg", message) || message.empty() || message.size() > 65536)
     {
-        lock_guard<mutex> lock(_connMutex);
-        for (auto it = _userConnMap.begin(); it != _userConnMap.end(); ++it)
-        {
-            if (it->second == conn)
-            {
-                // 从map表删除用户的链接信息
-                user.setId(it->first);
-                _userConnMap.erase(it);
-                break;
-            }
-        }
-    }
-
-    // 用户注销，相当于就是下线，在redis中取消订阅通道
-    _redis.unsubscribe(user.getId()); 
-
-    // 更新用户的状态信息
-    if (user.getId() != -1)
-    {
-        user.setState("offline");
-        _userModel.updateState(user);
-    }
-}
-
-// 一对一聊天业务
-void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time)
-{
-    int toid = js["toid"].get<int>();
-
-    {
-        lock_guard<mutex> lock(_connMutex);
-        auto it = _userConnMap.find(toid);
-        if (it != _userConnMap.end())
-        {
-            // toid在线，转发消息   服务器主动推送消息给toid用户
-            it->second->send(js.dump());
-            return;
-        }
-    }
-
-    // 查询toid是否在线 
-    User user = _userModel.query(toid);
-    if (user.getState() == "online")
-    {
-        _redis.publish(toid, js.dump());
+        sendError(connection, ONE_CHAT_MSG, "INVALID_ARGUMENT", "invalid recipient or message");
         return;
     }
 
-    // toid不在线，存储离线消息
-    _offlineMsgModel.insert(toid, js.dump());
-}
+    // The authenticated context is authoritative; client-supplied id/name are overwritten.
+    request["id"] = session->userId;
+    request["name"] = session->userName;
+    request.erase("session_id");
+    const std::string payload = request.dump();
 
-// 添加好友业务 msgid id friendid
-void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp time)
-{
-    int userid = js["id"].get<int>();
-    int friendid = js["friendid"].get<int>();
-
-    // 存储好友信息
-    _friendModel.insert(userid, friendid);
-}
-
-// 创建群组业务
-void ChatService::createGroup(const TcpConnectionPtr &conn, json &js, Timestamp time)
-{
-    int userid = js["id"].get<int>();
-    string name = js["groupname"];
-    string desc = js["groupdesc"];
-
-    // 存储新创建的群组信息
-    Group group(-1, name, desc);
-    if (_groupModel.createGroup(group))
+    muduo::net::TcpConnectionPtr localRecipient;
     {
-        // 存储群组创建人信息
-        _groupModel.addGroup(userid, group.getId(), "creator");
+        std::lock_guard<std::mutex> lock(connectionMutex_);
+        const auto iterator = userConnections_.find(recipientId);
+        if (iterator != userConnections_.end()) localRecipient = iterator->second;
+    }
+    if (localRecipient)
+    {
+        nexusim::sendFramed(localRecipient, payload);
+    }
+    else if (redis_.isUserPresent(recipientId))
+    {
+        if (!redis_.publish(recipientId, payload))
+        {
+            offlineMessageModel_.insert(recipientId, payload);
+        }
+    }
+    else
+    {
+        offlineMessageModel_.insert(recipientId, payload);
     }
 }
 
-// 加入群组业务
-void ChatService::addGroup(const TcpConnectionPtr &conn, json &js, Timestamp time)
+void ChatService::loginout(const muduo::net::TcpConnectionPtr &connection,
+                           json &, muduo::Timestamp)
 {
-    int userid = js["id"].get<int>();
-    int groupid = js["groupid"].get<int>();
-    _groupModel.addGroup(userid, groupid, "normal");
-}
-
-// 群组聊天业务
-void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp time)
-{
-    int userid = js["id"].get<int>();
-    int groupid = js["groupid"].get<int>();
-    vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
-
-    lock_guard<mutex> lock(_connMutex);
-    for (int id : useridVec)
+    const auto session = detachConnection(connection);
+    if (!session || !session->authenticated)
     {
-        auto it = _userConnMap.find(id);
-        if (it != _userConnMap.end())
-        {
-            // 转发群消息
-            it->second->send(js.dump());
-        }
-        else
-        {
-            // 查询toid是否在线 
-            User user = _userModel.query(id);
-            if (user.getState() == "online")
-            {
-                _redis.publish(id, js.dump());
-            }
-            else
-            {
-                // 存储离线群消息
-                _offlineMsgModel.insert(id, js.dump());
-            }
-        }
-    }
-}
-
-// 从redis消息队列中获取订阅的消息
-void ChatService::handleRedisSubscribeMessage(int userid, string msg)
-{
-    lock_guard<mutex> lock(_connMutex);
-    auto it = _userConnMap.find(userid);
-    if (it != _userConnMap.end())
-    {
-        it->second->send(msg);
+        sendError(connection, LOGINOUT_MSG, "UNAUTHENTICATED", "login is required");
         return;
     }
+    cleanupSession(*session);
+    connection->shutdown();
+}
 
-    // 存储该用户的离线消息
-    _offlineMsgModel.insert(userid, msg);
+void ChatService::reset()
+{
+    userModel_.resetState();
+}
+
+void ChatService::handleRedisSubscribeMessage(int userId, std::string message)
+{
+    muduo::net::TcpConnectionPtr connection;
+    {
+        std::lock_guard<std::mutex> lock(connectionMutex_);
+        const auto iterator = userConnections_.find(userId);
+        if (iterator != userConnections_.end()) connection = iterator->second;
+    }
+    // Every node receives the cluster channel. Only the owner forwards it; the
+    // publisher is responsible for offline fallback on publish failure.
+    if (connection) nexusim::sendFramed(connection, message);
+}
+
+void ChatService::sendError(const muduo::net::TcpConnectionPtr &connection,
+                            int requestMsgId, const std::string &code,
+                            const std::string &message) const
+{
+    json response;
+    response["msgid"] = ERROR_MSG;
+    response["request_msgid"] = requestMsgId;
+    response["error"] = code;
+    response["errmsg"] = message;
+    nexusim::sendFramed(connection, response.dump());
 }

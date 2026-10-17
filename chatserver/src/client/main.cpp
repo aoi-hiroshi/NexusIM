@@ -7,6 +7,7 @@
 #include <ctime>
 #include <unordered_map>
 #include <functional>
+#include <mutex>
 using namespace std;
 using json = nlohmann::json;
 
@@ -17,10 +18,28 @@ using json = nlohmann::json;
 #include <arpa/inet.h>
 #include <semaphore.h>
 #include <atomic>
+#include <cstdint>
 
 #include "group.hpp"
 #include "user.hpp"
 #include "public.hpp"
+#include "framecodec.hpp"
+#include "simplebuffer.hpp"
+
+bool sendFramedJson(int clientfd, const string &payload)
+{
+    static mutex sendMutex;
+    lock_guard<mutex> lock(sendMutex);
+    const string frame = nexusim::FrameCodec::encode(payload);
+    size_t sent = 0;
+    while (sent < frame.size())
+    {
+        const ssize_t count = send(clientfd, frame.data() + sent, frame.size() - sent, 0);
+        if (count <= 0) return false;
+        sent += static_cast<size_t>(count);
+    }
+    return true;
+}
 
 // 记录当前系统登录的用户信息
 User g_currentUser;
@@ -36,6 +55,7 @@ bool isMainMenuRunning = false;
 sem_t rwsem;
 // 记录登录状态
 atomic_bool g_isLoginSuccess{false};
+atomic_uint64_t g_heartbeatSequence{1};
 
 
 // 接收线程
@@ -90,6 +110,19 @@ int main(int argc, char **argv)
     // 连接服务器成功，启动接收子线程
     std::thread readTask(readTaskHandler, clientfd); // pthread_create
     readTask.detach();                               // pthread_detach
+    std::thread heartbeatTask([clientfd] {
+        for (;;)
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            if (!g_isLoginSuccess.load()) continue;
+            json heartbeat;
+            heartbeat["msgid"] = HEARTBEAT_MSG;
+            heartbeat["request_id"] = "cli-" +
+                                      std::to_string(g_heartbeatSequence.fetch_add(1));
+            if (!sendFramedJson(clientfd, heartbeat.dump())) return;
+        }
+    });
+    heartbeatTask.detach();
 
     // main线程用于接收用户输入，负责发送数据
     for (;;)
@@ -125,8 +158,7 @@ int main(int argc, char **argv)
 
             g_isLoginSuccess = false;
 
-            int len = send(clientfd, request.c_str(), strlen(request.c_str()) + 1, 0);
-            if (len == -1)
+            if (!sendFramedJson(clientfd, request))
             {
                 cerr << "send login msg error:" << request << endl;
             }
@@ -156,8 +188,7 @@ int main(int argc, char **argv)
             js["password"] = pwd;
             string request = js.dump();
 
-            int len = send(clientfd, request.c_str(), strlen(request.c_str()) + 1, 0);
-            if (len == -1)
+            if (!sendFramedJson(clientfd, request))
             {
                 cerr << "send reg msg error:" << request << endl;
             }
@@ -286,45 +317,60 @@ void doLoginResponse(json &responsejs)
 // 子线程 - 接收线程
 void readTaskHandler(int clientfd)
 {
+    nexusim::SimpleBuffer accumulated;
+    const nexusim::FrameCodec codec;
     for (;;)
     {
-        char buffer[1024] = {0};
-        int len = recv(clientfd, buffer, 1024, 0);  // 阻塞了
+        char buffer[4096];
+        int len = recv(clientfd, buffer, sizeof(buffer), 0);  // CLI接收线程允许阻塞
         if (-1 == len || 0 == len)
         {
             close(clientfd);
             exit(-1);
         }
 
+        accumulated.append(buffer, static_cast<size_t>(len));
+        const auto result = codec.decode(&accumulated, [](string payload) {
         // 接收ChatServer转发的数据，反序列化生成json数据对象
-        json js = json::parse(buffer);
+        json js = json::parse(payload);
         int msgtype = js["msgid"].get<int>();
         if (ONE_CHAT_MSG == msgtype)
         {
             cout << js["time"].get<string>() << " [" << js["id"] << "]" << js["name"].get<string>()
                  << " said: " << js["msg"].get<string>() << endl;
-            continue;
+            return;
         }
 
         if (GROUP_CHAT_MSG == msgtype)
         {
             cout << "群消息[" << js["groupid"] << "]:" << js["time"].get<string>() << " [" << js["id"] << "]" << js["name"].get<string>()
                  << " said: " << js["msg"].get<string>() << endl;
-            continue;
+            return;
         }
 
         if (LOGIN_MSG_ACK == msgtype)
         {
             doLoginResponse(js); // 处理登录响应的业务逻辑
             sem_post(&rwsem);    // 通知主线程，登录结果处理完成
-            continue;
+            return;
         }
 
         if (REG_MSG_ACK == msgtype)
         {
             doRegResponse(js);
             sem_post(&rwsem);    // 通知主线程，注册结果处理完成
-            continue;
+            return;
+        }
+        if (HEARTBEAT_MSG_ACK == msgtype || ERROR_MSG == msgtype)
+        {
+            return;
+        }
+        });
+        if (result.status == nexusim::FrameCodec::Status::InvalidLength)
+        {
+            cerr << "server sent an invalid frame" << endl;
+            close(clientfd);
+            return;
         }
     }
 }
@@ -445,8 +491,7 @@ void addfriend(int clientfd, string str)
     js["friendid"] = friendid;
     string buffer = js.dump();
 
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
-    if (-1 == len)
+    if (!sendFramedJson(clientfd, buffer))
     {
         cerr << "send addfriend msg error -> " << buffer << endl;
     }
@@ -473,8 +518,7 @@ void chat(int clientfd, string str)
     js["time"] = getCurrentTime();
     string buffer = js.dump();
 
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
-    if (-1 == len)
+    if (!sendFramedJson(clientfd, buffer))
     {
         cerr << "send chat msg error -> " << buffer << endl;
     }
@@ -499,8 +543,7 @@ void creategroup(int clientfd, string str)
     js["groupdesc"] = groupdesc;
     string buffer = js.dump();
 
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
-    if (-1 == len)
+    if (!sendFramedJson(clientfd, buffer))
     {
         cerr << "send creategroup msg error -> " << buffer << endl;
     }
@@ -515,8 +558,7 @@ void addgroup(int clientfd, string str)
     js["groupid"] = groupid;
     string buffer = js.dump();
 
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
-    if (-1 == len)
+    if (!sendFramedJson(clientfd, buffer))
     {
         cerr << "send addgroup msg error -> " << buffer << endl;
     }
@@ -543,8 +585,7 @@ void groupchat(int clientfd, string str)
     js["time"] = getCurrentTime();
     string buffer = js.dump();
 
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
-    if (-1 == len)
+    if (!sendFramedJson(clientfd, buffer))
     {
         cerr << "send groupchat msg error -> " << buffer << endl;
     }
@@ -557,8 +598,7 @@ void loginout(int clientfd, string)
     js["id"] = g_currentUser.getId();
     string buffer = js.dump();
 
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
-    if (-1 == len)
+    if (!sendFramedJson(clientfd, buffer))
     {
         cerr << "send loginout msg error -> " << buffer << endl;
     }

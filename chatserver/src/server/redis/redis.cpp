@@ -1,134 +1,224 @@
 #include "redis.hpp"
+
+#include <cstdlib>
 #include <iostream>
-using namespace std;
+#include <sys/socket.h>
+#include <utility>
+
+namespace
+{
+std::string environmentOr(const char *name, const char *fallback)
+{
+    const char *value = std::getenv(name);
+    return value == nullptr || *value == '\0' ? std::string(fallback) : std::string(value);
+}
+
+redisContext *connectContext(const std::string &host, int port)
+{
+    timeval timeout{};
+    timeout.tv_sec = 3;
+    redisContext *context = redisConnectWithTimeout(host.c_str(), port, timeout);
+    if (context != nullptr && context->err != 0)
+    {
+        redisFree(context);
+        return nullptr;
+    }
+    if (context != nullptr)
+    {
+        redisSetTimeout(context, timeout);
+    }
+    return context;
+}
+
+bool integerReply(redisReply *reply, long long expected)
+{
+    const bool result = reply != nullptr && reply->type == REDIS_REPLY_INTEGER &&
+                        reply->integer == expected;
+    if (reply != nullptr) freeReplyObject(reply);
+    return result;
+}
+} // namespace
 
 Redis::Redis()
-    : _publish_context(nullptr), _subcribe_context(nullptr)
+    : publishContext_(nullptr), subscribeContext_(nullptr), presenceContext_(nullptr),
+      stopping_(false), clusterChannel_(environmentOr("CHAT_REDIS_CHANNEL", "nexusim:messages"))
 {
 }
 
 Redis::~Redis()
 {
-    if (_publish_context != nullptr)
+    stopping_.store(true);
+    if (subscribeContext_ != nullptr && subscribeContext_->fd >= 0)
     {
-        redisFree(_publish_context);
+        ::shutdown(subscribeContext_->fd, SHUT_RDWR);
     }
-
-    if (_subcribe_context != nullptr)
-    {
-        redisFree(_subcribe_context);
-    }
+    if (observerThread_.joinable()) observerThread_.join();
+    if (publishContext_ != nullptr) redisFree(publishContext_);
+    if (subscribeContext_ != nullptr) redisFree(subscribeContext_);
+    if (presenceContext_ != nullptr) redisFree(presenceContext_);
 }
 
 bool Redis::connect()
 {
-    // 负责publish发布消息的上下文连接
-    _publish_context = redisConnect("127.0.0.1", 6379);
-    if (nullptr == _publish_context)
+    const std::string host = environmentOr("CHAT_REDIS_HOST", "127.0.0.1");
+    int port = 6379;
+    try
     {
-        cerr << "connect redis failed!" << endl;
+        port = std::stoi(environmentOr("CHAT_REDIS_PORT", "6379"));
+    }
+    catch (...)
+    {
+        std::cerr << "invalid CHAT_REDIS_PORT" << std::endl;
         return false;
     }
 
-    // 负责subscribe订阅消息的上下文连接
-    _subcribe_context = redisConnect("127.0.0.1", 6379);
-    if (nullptr == _subcribe_context)
+    publishContext_ = connectContext(host, port);
+    subscribeContext_ = connectContext(host, port);
+    presenceContext_ = connectContext(host, port);
+    if (publishContext_ == nullptr || subscribeContext_ == nullptr || presenceContext_ == nullptr)
     {
-        cerr << "connect redis failed!" << endl;
+        std::cerr << "connect redis failed" << std::endl;
         return false;
     }
 
-    // 在单独的线程中，监听通道上的事件，有消息给业务层进行上报
-    thread t([&]() {
-        observer_channel_message();
-    });
-    t.detach();
-
-    cout << "connect redis-server success!" << endl;
-
+    redisReply *reply = static_cast<redisReply *>(
+        redisCommand(subscribeContext_, "SUBSCRIBE %s", clusterChannel_.c_str()));
+    if (reply == nullptr || reply->type == REDIS_REPLY_ERROR)
+    {
+        if (reply != nullptr) freeReplyObject(reply);
+        std::cerr << "subscribe cluster channel failed" << std::endl;
+        return false;
+    }
+    freeReplyObject(reply);
+    observerThread_ = std::thread([this] { observerChannelMessages(); });
     return true;
 }
 
-// 向redis指定的通道channel发布消息
-bool Redis::publish(int channel, string message)
+bool Redis::publish(int recipientId, const std::string &message)
 {
-    redisReply *reply = (redisReply *)redisCommand(_publish_context, "PUBLISH %d %s", channel, message.c_str());
-    if (nullptr == reply)
-    {
-        cerr << "publish command failed!" << endl;
-        return false;
-    }
+    if (publishContext_ == nullptr) return false;
+    const std::string envelope = std::to_string(recipientId) + "\n" + message;
+    std::lock_guard<std::mutex> lock(publishMutex_);
+    redisReply *reply = static_cast<redisReply *>(redisCommand(
+        publishContext_, "PUBLISH %s %b", clusterChannel_.c_str(),
+        envelope.data(), envelope.size()));
+    if (reply == nullptr) return false;
     freeReplyObject(reply);
     return true;
 }
 
-// 向redis指定的通道subscribe订阅消息
-bool Redis::subscribe(int channel)
+bool Redis::acquirePresence(int userId, const std::string &nodeId,
+                            const std::string &connectionId,
+                            const std::string &sessionId, int ttlSeconds)
 {
-    // SUBSCRIBE命令本身会造成线程阻塞等待通道里面发生消息，这里只做订阅通道，不接收通道消息
-    // 通道消息的接收专门在observer_channel_message函数中的独立线程中进行
-    // 只负责发送命令，不阻塞接收redis server响应消息，否则和notifyMsg线程抢占响应资源
-    if (REDIS_ERR == redisAppendCommand(this->_subcribe_context, "SUBSCRIBE %d", channel))
-    {
-        cerr << "subscribe command failed!" << endl;
-        return false;
-    }
-    // redisBufferWrite可以循环发送缓冲区，直到缓冲区数据发送完毕（done被置为1）
-    int done = 0;
-    while (!done)
-    {
-        if (REDIS_ERR == redisBufferWrite(this->_subcribe_context, &done))
-        {
-            cerr << "subscribe command failed!" << endl;
-            return false;
-        }
-    }
-    // redisGetReply
-
-    return true;
+    if (presenceContext_ == nullptr || ttlSeconds <= 0) return false;
+    const std::string key = presenceKey(userId);
+    const std::string value = presenceValue(nodeId, connectionId, sessionId);
+    std::lock_guard<std::mutex> lock(presenceMutex_);
+    redisReply *reply = static_cast<redisReply *>(redisCommand(
+        presenceContext_, "SET %s %b NX EX %d", key.c_str(), value.data(),
+        value.size(), ttlSeconds));
+    const bool ok = reply != nullptr && reply->type == REDIS_REPLY_STATUS &&
+                    std::string(reply->str, reply->len) == "OK";
+    if (reply != nullptr) freeReplyObject(reply);
+    return ok;
 }
 
-// 向redis指定的通道unsubscribe取消订阅消息
-bool Redis::unsubscribe(int channel)
+bool Redis::renewPresence(int userId, const std::string &nodeId,
+                          const std::string &connectionId,
+                          const std::string &sessionId, int ttlSeconds)
 {
-    if (REDIS_ERR == redisAppendCommand(this->_subcribe_context, "UNSUBSCRIBE %d", channel))
-    {
-        cerr << "unsubscribe command failed!" << endl;
-        return false;
-    }
-    // redisBufferWrite可以循环发送缓冲区，直到缓冲区数据发送完毕（done被置为1）
-    int done = 0;
-    while (!done)
-    {
-        if (REDIS_ERR == redisBufferWrite(this->_subcribe_context, &done))
-        {
-            cerr << "unsubscribe command failed!" << endl;
-            return false;
-        }
-    }
-    return true;
+    if (presenceContext_ == nullptr || ttlSeconds <= 0) return false;
+    static const char script[] =
+        "if redis.call('GET',KEYS[1]) == ARGV[1] then "
+        "return redis.call('EXPIRE',KEYS[1],ARGV[2]) else return 0 end";
+    const std::string key = presenceKey(userId);
+    const std::string value = presenceValue(nodeId, connectionId, sessionId);
+    std::lock_guard<std::mutex> lock(presenceMutex_);
+    redisReply *reply = static_cast<redisReply *>(redisCommand(
+        presenceContext_, "EVAL %s 1 %s %b %d", script, key.c_str(),
+        value.data(), value.size(), ttlSeconds));
+    return integerReply(reply, 1);
 }
 
-// 在独立线程中接收订阅通道中的消息
-void Redis::observer_channel_message()
+bool Redis::releasePresence(int userId, const std::string &nodeId,
+                            const std::string &connectionId,
+                            const std::string &sessionId)
+{
+    if (presenceContext_ == nullptr) return false;
+    static const char script[] =
+        "if redis.call('GET',KEYS[1]) == ARGV[1] then "
+        "return redis.call('DEL',KEYS[1]) else return 0 end";
+    const std::string key = presenceKey(userId);
+    const std::string value = presenceValue(nodeId, connectionId, sessionId);
+    std::lock_guard<std::mutex> lock(presenceMutex_);
+    redisReply *reply = static_cast<redisReply *>(redisCommand(
+        presenceContext_, "EVAL %s 1 %s %b", script, key.c_str(),
+        value.data(), value.size()));
+    return integerReply(reply, 1);
+}
+
+bool Redis::isUserPresent(int userId)
+{
+    if (presenceContext_ == nullptr) return false;
+    const std::string key = presenceKey(userId);
+    std::lock_guard<std::mutex> lock(presenceMutex_);
+    redisReply *reply = static_cast<redisReply *>(
+        redisCommand(presenceContext_, "EXISTS %s", key.c_str()));
+    return integerReply(reply, 1);
+}
+
+void Redis::init_notify_handler(std::function<void(int, std::string)> handler)
+{
+    std::lock_guard<std::mutex> lock(handlerMutex_);
+    notifyHandler_ = std::move(handler);
+}
+
+void Redis::observerChannelMessages()
 {
     redisReply *reply = nullptr;
-    while (REDIS_OK == redisGetReply(this->_subcribe_context, (void **)&reply))
+    while (!stopping_.load() &&
+           redisGetReply(subscribeContext_, reinterpret_cast<void **>(&reply)) == REDIS_OK)
     {
-        // 订阅收到的消息是一个带三元素的数组
-        if (reply != nullptr && reply->element[2] != nullptr && reply->element[2]->str != nullptr)
+        if (reply != nullptr && reply->type == REDIS_REPLY_ARRAY && reply->elements >= 3 &&
+            reply->element[2] != nullptr && reply->element[2]->str != nullptr)
         {
-            // 给业务层上报通道上发生的消息
-            _notify_message_handler(atoi(reply->element[1]->str) , reply->element[2]->str);
+            const std::string envelope(reply->element[2]->str, reply->element[2]->len);
+            const auto separator = envelope.find('\n');
+            if (separator != std::string::npos)
+            {
+                try
+                {
+                    const int recipientId = std::stoi(envelope.substr(0, separator));
+                    std::function<void(int, std::string)> handler;
+                    {
+                        std::lock_guard<std::mutex> lock(handlerMutex_);
+                        handler = notifyHandler_;
+                    }
+                    if (handler) handler(recipientId, envelope.substr(separator + 1));
+                }
+                catch (...)
+                {
+                    std::cerr << "ignored malformed redis message envelope" << std::endl;
+                }
+            }
         }
-
-        freeReplyObject(reply);
+        if (reply != nullptr)
+        {
+            freeReplyObject(reply);
+            reply = nullptr;
+        }
     }
-
-    cerr << ">>>>>>>>>>>>> observer_channel_message quit <<<<<<<<<<<<<" << endl;
 }
 
-void Redis::init_notify_handler(function<void(int,string)> fn)
+std::string Redis::presenceKey(int userId) const
 {
-    this->_notify_message_handler = fn;
+    return "nexusim:presence:user:" + std::to_string(userId);
+}
+
+std::string Redis::presenceValue(const std::string &nodeId,
+                                 const std::string &connectionId,
+                                 const std::string &sessionId) const
+{
+    return nodeId + "|" + connectionId + "|" + sessionId;
 }

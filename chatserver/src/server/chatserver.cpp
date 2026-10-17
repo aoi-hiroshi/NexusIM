@@ -1,62 +1,183 @@
-#include "chatserver.hpp"
-#include "json.hpp"
-#include "chatservice.hpp"
+#include "server/chatserver.hpp"
 
-#include <iostream>
-#include <functional>
-#include <string>
-using namespace std;
-using namespace placeholders;
+#include "json.hpp"
+#include "public.hpp"
+#include "server/chatservice.hpp"
+#include "server/wireprotocol.hpp"
+
+#include <muduo/base/Logging.h>
+
+#include <chrono>
+#include <memory>
+#include <utility>
+
 using json = nlohmann::json;
 
-// 初始化聊天服务器对象
-ChatServer::ChatServer(EventLoop *loop,
-                       const InetAddress &listenAddr,
-                       const string &nameArg)
-    : _server(loop, listenAddr, nameArg), _loop(loop)
+ChatServer::ChatServer(muduo::net::EventLoop *loop,
+                       const muduo::net::InetAddress &listenAddress,
+                       const std::string &name)
+    : server_(loop, listenAddress, name), loop_(loop),
+      service_(ChatService::instance()), codec_(),
+      businessStrand_(4, 1024, 64),
+      presenceExecutor_("presence", 2, 512), nextRequestId_(1)
 {
-    // 注册链接回调
-    _server.setConnectionCallback(std::bind(&ChatServer::onConnection, this, _1));
-
-    // 注册消息回调
-    _server.setMessageCallback(std::bind(&ChatServer::onMessage, this, _1, _2, _3));
-
-    // 设置线程数量
-    _server.setThreadNum(4);
+    server_.setConnectionCallback(
+        std::bind(&ChatServer::onConnection, this, std::placeholders::_1));
+    server_.setMessageCallback(
+        std::bind(&ChatServer::onMessage, this, std::placeholders::_1,
+                  std::placeholders::_2, std::placeholders::_3));
+    server_.setThreadNum(4);
+    loop_->runEvery(1.0, [this] { pendingRequests_.expire(); });
 }
 
-// 启动服务
 void ChatServer::start()
 {
-    _server.start();
+    server_.start();
 }
 
-// 上报链接相关信息的回调函数
-void ChatServer::onConnection(const TcpConnectionPtr &conn)
+void ChatServer::onConnection(const muduo::net::TcpConnectionPtr &connection)
 {
-    // 客户端断开链接
-    if (!conn->connected())
+    if (connection->connected())
     {
-        ChatService::instance()->clientCloseException(conn);
-        conn->shutdown();
+        service_->connectionOpened(connection);
+        return;
+    }
+
+    const auto session = service_->detachConnection(connection);
+    businessStrand_.cancel(connection->name());
+    if (session)
+    {
+        pendingRequests_.cancelConnection(session->connectionId, session->sessionId);
+        if (session->authenticated &&
+            !presenceExecutor_.trySubmit([service = service_, session = *session] {
+                service->cleanupSession(session);
+            }))
+        {
+            LOG_WARN << "presence cleanup queue full; Redis TTL will expire session "
+                     << session->sessionId;
+        }
     }
 }
 
-// 上报读写事件相关信息的回调函数
-void ChatServer::onMessage(const TcpConnectionPtr &conn,
-                           Buffer *buffer,
-                           Timestamp time)
+void ChatServer::onMessage(const muduo::net::TcpConnectionPtr &connection,
+                           muduo::net::Buffer *buffer, muduo::Timestamp timestamp)
 {
-    string buf = buffer->retrieveAllAsString();
+    const auto result = codec_.decode(buffer, [this, connection, timestamp](std::string frame) {
+        dispatchFrame(connection, std::move(frame), timestamp);
+    });
+    if (result.status == nexusim::FrameCodec::Status::InvalidLength)
+    {
+        sendProtocolError(connection, "INVALID_FRAME", "invalid or oversized frame length");
+        connection->shutdown();
+    }
+}
 
-    // 测试，添加json打印代码
-    cout << buf << endl;
+void ChatServer::dispatchFrame(const muduo::net::TcpConnectionPtr &connection,
+                               std::string frame, muduo::Timestamp timestamp)
+{
+    json request;
+    try
+    {
+        request = json::parse(frame);
+    }
+    catch (const std::exception &)
+    {
+        sendProtocolError(connection, "INVALID_JSON", "frame payload is not valid JSON");
+        return;
+    }
+    const auto messageId = request.find("msgid");
+    if (messageId == request.end() || !messageId->is_number_integer())
+    {
+        sendProtocolError(connection, "INVALID_MESSAGE", "integer msgid is required");
+        return;
+    }
+    const int type = messageId->get<int>();
+    if (type == HEARTBEAT_MSG)
+    {
+        dispatchHeartbeat(connection, request);
+        return;
+    }
 
-    // 数据的反序列化
-    json js = json::parse(buf);
-    // 达到的目的：完全解耦网络模块的代码和业务模块的代码
-    // 通过js["msgid"] 获取=》业务handler=》conn  js  time
-    auto msgHandler = ChatService::instance()->getHandler(js["msgid"].get<int>());
-    // 回调消息绑定好的事件处理器，来执行相应的业务处理
-    msgHandler(conn, js, time);
+    std::weak_ptr<muduo::net::TcpConnection> weakConnection(connection);
+    const bool accepted = businessStrand_.trySubmit(
+        connection->name(), [this, weakConnection, request = std::move(request), timestamp, type]() mutable {
+            const auto liveConnection = weakConnection.lock();
+            if (!liveConnection) return;
+            auto handler = service_->getHandler(type);
+            handler(liveConnection, request, timestamp);
+        });
+    if (!accepted)
+    {
+        sendProtocolError(connection, "SERVER_BUSY", "connection business queue is full");
+    }
+}
+
+void ChatServer::dispatchHeartbeat(const muduo::net::TcpConnectionPtr &connection,
+                                   const json &request)
+{
+    const auto session = service_->sessionFor(connection);
+    if (!session || !session->authenticated)
+    {
+        sendProtocolError(connection, "UNAUTHENTICATED", "heartbeat requires an authenticated session");
+        return;
+    }
+
+    std::string requestId;
+    const auto suppliedId = request.find("request_id");
+    if (suppliedId != request.end() && suppliedId->is_string())
+    {
+        requestId = suppliedId->get<std::string>();
+    }
+    if (requestId.empty() || requestId.size() > 128)
+    {
+        requestId = std::to_string(nextRequestId_.fetch_add(1));
+    }
+    const std::string registryRequestId = session->sessionId + ":" + requestId;
+    const auto deadline = nexusim::PendingRequestRegistry::Clock::now() +
+                          std::chrono::seconds(5);
+    if (!pendingRequests_.add({registryRequestId, session->connectionId,
+                               session->sessionId, deadline}))
+    {
+        sendProtocolError(connection, "DUPLICATE_REQUEST", "request_id is already pending");
+        return;
+    }
+
+    std::weak_ptr<muduo::net::TcpConnection> weakConnection(connection);
+    if (!presenceExecutor_.trySubmit([this, weakConnection, session = *session,
+                                      requestId, registryRequestId] {
+            const bool renewed = service_->renewPresence(session);
+            const auto completion = pendingRequests_.complete(
+                registryRequestId, session.connectionId, session.sessionId);
+            const auto liveConnection = weakConnection.lock();
+            if (!liveConnection || completion != nexusim::PendingRequestRegistry::Completion::Completed ||
+                !service_->isCurrentSession(session))
+            {
+                return;
+            }
+            json response;
+            response["msgid"] = HEARTBEAT_MSG_ACK;
+            response["request_id"] = requestId;
+            response["ok"] = renewed;
+            if (!renewed)
+            {
+                response["error"] = "PRESENCE_LOST";
+                service_->invalidateSession(session);
+            }
+            nexusim::sendFramed(liveConnection, response.dump());
+            if (!renewed) liveConnection->shutdown();
+        }))
+    {
+        pendingRequests_.cancel(registryRequestId);
+        sendProtocolError(connection, "SERVER_BUSY", "presence queue is full");
+    }
+}
+
+void ChatServer::sendProtocolError(const muduo::net::TcpConnectionPtr &connection,
+                                   const std::string &code, const std::string &message)
+{
+    json response;
+    response["msgid"] = ERROR_MSG;
+    response["error"] = code;
+    response["errmsg"] = message;
+    nexusim::sendFramed(connection, response.dump());
 }

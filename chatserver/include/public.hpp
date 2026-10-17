@@ -17,6 +17,9 @@ enum EnMsgType
     CREATE_GROUP_MSG, // 创建群组
     ADD_GROUP_MSG, // 加入群组
     GROUP_CHAT_MSG, // 群聊天
+    HEARTBEAT_MSG, // 独立心跳/Presence续租
+    HEARTBEAT_MSG_ACK,
+    ERROR_MSG,
 };
 
 #endif

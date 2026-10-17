@@ -1,5 +1,10 @@
-cmake_minimum_required(VERSION 3.0)
-project(chat)
+cmake_minimum_required(VERSION 3.10)
+project(NexusIMChat LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+find_package(OpenSSL REQUIRED)
 
 # 配置编译选项
 set(CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS} -g)
@@ -13,6 +18,8 @@ include_directories(${PROJECT_SOURCE_DIR}/include/server)
 include_directories(${PROJECT_SOURCE_DIR}/include/server/db)
 include_directories(${PROJECT_SOURCE_DIR}/include/server/model)
 include_directories(${PROJECT_SOURCE_DIR}/include/server/redis)
+include_directories(${PROJECT_SOURCE_DIR}/include/server/concurrency)
+include_directories(${PROJECT_SOURCE_DIR}/include/server/security)
 include_directories(${PROJECT_SOURCE_DIR}/thirdparty)
 link_directories(/usr/lib64/mysql)
 

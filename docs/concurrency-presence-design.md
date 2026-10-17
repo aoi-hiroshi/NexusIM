@@ -160,7 +160,7 @@ V1 使用 Redis Pub/Sub 作为实时跨节点通知，不把它描述为可靠�
 - 群聊；
 - 任何仍信任客户端 `id/name` 的接口。
 
-V1 默认采用消息类型 allowlist，只注册已完成安全审计的 Login、Register、Logout、Heartbeat、QueryUser、DirectChat；AI 接口在对应阶段完成审计后再加入。其他旧消息类型返回 `FEATURE_DISABLED`，而不是继续调用旧 Model。
+阶段 1 默认采用消息类型 allowlist，只注册已完成安全审计的 Login、Register、Logout、Heartbeat、DirectChat；QueryUser 在 UserService 阶段完成后再加入，AI 接口也在对应阶段完成审计后再加入。其他旧消息类型返回 `FEATURE_DISABLED`，而不是继续调用旧 Model。
 
 ## 10. 非 TLS 部署边界
 

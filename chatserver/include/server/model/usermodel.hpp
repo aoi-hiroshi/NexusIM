@@ -15,6 +15,9 @@ public:
     // 更新用户的状态信息
     bool updateState(User user);
 
+    // Replaces a legacy/plain value with a versioned password hash.
+    bool updatePassword(int id, const std::string &encodedPassword);
+
     // 重置用户的状态信息
     void resetState();
 };

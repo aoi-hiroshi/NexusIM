@@ -1,34 +1,48 @@
 #ifndef CHATSERVER_H
 #define CHATSERVER_H
 
-#include <muduo/net/TcpServer.h>
-#include <muduo/net/EventLoop.h>
-using namespace muduo;
-using namespace muduo::net;
+#include "framecodec.hpp"
+#include "json.hpp"
+#include "server/concurrency/boundedexecutor.hpp"
+#include "server/concurrency/connectionstrand.hpp"
+#include "server/concurrency/pendingrequest.hpp"
 
-// 聊天服务器的主类
+#include <muduo/net/EventLoop.h>
+#include <muduo/net/TcpServer.h>
+
+#include <atomic>
+#include <cstdint>
+#include <string>
+
+class ChatService;
+
 class ChatServer
 {
 public:
-    // 初始化聊天服务器对象
-    ChatServer(EventLoop *loop,
-               const InetAddress &listenAddr,
-               const string &nameArg);
-
-    // 启动服务
+    ChatServer(muduo::net::EventLoop *loop,
+               const muduo::net::InetAddress &listenAddress,
+               const std::string &name);
     void start();
 
 private:
-    // 上报链接相关信息的回调函数
-    void onConnection(const TcpConnectionPtr &);
+    void onConnection(const muduo::net::TcpConnectionPtr &connection);
+    void onMessage(const muduo::net::TcpConnectionPtr &connection,
+                   muduo::net::Buffer *buffer, muduo::Timestamp timestamp);
+    void dispatchFrame(const muduo::net::TcpConnectionPtr &connection,
+                       std::string frame, muduo::Timestamp timestamp);
+    void dispatchHeartbeat(const muduo::net::TcpConnectionPtr &connection,
+                           const nlohmann::json &request);
+    void sendProtocolError(const muduo::net::TcpConnectionPtr &connection,
+                           const std::string &code, const std::string &message);
 
-    // 上报读写事件相关信息的回调函数
-    void onMessage(const TcpConnectionPtr &,
-                   Buffer *,
-                   Timestamp);
-
-    TcpServer _server; // 组合的muduo库，实现服务器功能的类对象
-    EventLoop *_loop;  // 指向事件循环对象的指针
+    muduo::net::TcpServer server_;
+    muduo::net::EventLoop *loop_;
+    ChatService *service_;
+    nexusim::FrameCodec codec_;
+    nexusim::ConnectionStrand businessStrand_;
+    nexusim::BoundedExecutor presenceExecutor_;
+    nexusim::PendingRequestRegistry pendingRequests_;
+    std::atomic<std::uint64_t> nextRequestId_;
 };
 
 #endif

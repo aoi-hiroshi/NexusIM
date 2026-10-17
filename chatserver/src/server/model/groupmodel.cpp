@@ -4,14 +4,12 @@
 // 创建群组
 bool GroupModel::createGroup(Group &group)
 {
-    // 1.组装sql语句
-    char sql[1024] = {0};
-    sprintf(sql, "insert into allgroup(groupname, groupdesc) values('%s', '%s')",
-            group.getName().c_str(), group.getDesc().c_str());
-
     MySQL mysql;
     if (mysql.connect())
     {
+        const string sql = "insert into allgroup(groupname, groupdesc) values('" +
+                           mysql.escape(group.getName()) + "', '" +
+                           mysql.escape(group.getDesc()) + "')";
         if (mysql.update(sql))
         {
             group.setId(mysql_insert_id(mysql.getConnection()));
@@ -25,14 +23,12 @@ bool GroupModel::createGroup(Group &group)
 // 加入群组
 void GroupModel::addGroup(int userid, int groupid, string role)
 {
-    // 1.组装sql语句
-    char sql[1024] = {0};
-    sprintf(sql, "insert into groupuser values(%d, %d, '%s')",
-            groupid, userid, role.c_str());
-
     MySQL mysql;
     if (mysql.connect())
     {
+        const string sql = "insert into groupuser values(" + std::to_string(groupid) +
+                           ", " + std::to_string(userid) + ", '" +
+                           mysql.escape(role) + "')";
         mysql.update(sql);
     }
 }
