@@ -9,7 +9,7 @@ bool UserModel::insert(User &user)
     MySQL mysql;
     if (mysql.connect())
     {
-        const string sql = "insert into user(name, password, state) values('" +
+        const string sql = "insert into `User`(name, password, state) values('" +
                            mysql.escape(user.getName()) + "', '" +
                            mysql.escape(user.getPwd()) + "', 'offline')";
         if (mysql.update(sql))
@@ -28,7 +28,7 @@ User UserModel::query(int id)
 {
     // 1.组装sql语句
     char sql[1024] = {0};
-    sprintf(sql, "select * from user where id = %d", id);
+    sprintf(sql, "select * from `User` where id = %d", id);
 
     MySQL mysql;
     if (mysql.connect())
@@ -58,7 +58,7 @@ bool UserModel::updateState(User user)
 {
     // 1.组装sql语句
     char sql[1024] = {0};
-    sprintf(sql, "update user set state = '%s' where id = %d", user.getState().c_str(), user.getId());
+    sprintf(sql, "update `User` set state = '%s' where id = %d", user.getState().c_str(), user.getId());
 
     MySQL mysql;
     if (mysql.connect())
@@ -78,7 +78,7 @@ bool UserModel::updatePassword(int id, const std::string &encodedPassword)
     {
         return false;
     }
-    const string sql = "update user set password = '" +
+    const string sql = "update `User` set password = '" +
                        mysql.escape(encodedPassword) + "' where id = " +
                        std::to_string(id);
     return mysql.update(sql);
@@ -88,7 +88,7 @@ bool UserModel::updatePassword(int id, const std::string &encodedPassword)
 void UserModel::resetState()
 {
     // 1.组装sql语句
-    char sql[1024] = "update user set state = 'offline' where state = 'online'";
+    char sql[1024] = "update `User` set state = 'offline' where state = 'online'";
 
     MySQL mysql;
     if (mysql.connect())

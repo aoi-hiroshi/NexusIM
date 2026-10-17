@@ -7,7 +7,7 @@ bool GroupModel::createGroup(Group &group)
     MySQL mysql;
     if (mysql.connect())
     {
-        const string sql = "insert into allgroup(groupname, groupdesc) values('" +
+        const string sql = "insert into `AllGroup`(groupname, groupdesc) values('" +
                            mysql.escape(group.getName()) + "', '" +
                            mysql.escape(group.getDesc()) + "')";
         if (mysql.update(sql))
@@ -26,7 +26,7 @@ void GroupModel::addGroup(int userid, int groupid, string role)
     MySQL mysql;
     if (mysql.connect())
     {
-        const string sql = "insert into groupuser values(" + std::to_string(groupid) +
+        const string sql = "insert into `GroupUser` values(" + std::to_string(groupid) +
                            ", " + std::to_string(userid) + ", '" +
                            mysql.escape(role) + "')";
         mysql.update(sql);
@@ -41,8 +41,8 @@ vector<Group> GroupModel::queryGroups(int userid)
     2. 在根据群组信息，查询属于该群组的所有用户的userid，并且和user表进行多表联合查询，查出用户的详细信息
     */
     char sql[1024] = {0};
-    sprintf(sql, "select a.id,a.groupname,a.groupdesc from allgroup a inner join \
-         groupuser b on a.id = b.groupid where b.userid=%d",
+    sprintf(sql, "select a.id,a.groupname,a.groupdesc from `AllGroup` a inner join \
+         `GroupUser` b on a.id = b.groupid where b.userid=%d",
             userid);
 
     vector<Group> groupVec;
@@ -70,8 +70,8 @@ vector<Group> GroupModel::queryGroups(int userid)
     // 查询群组的用户信息
     for (Group &group : groupVec)
     {
-        sprintf(sql, "select a.id,a.name,a.state,b.grouprole from user a \
-            inner join groupuser b on b.userid = a.id where b.groupid=%d",
+        sprintf(sql, "select a.id,a.name,a.state,b.grouprole from `User` a \
+            inner join `GroupUser` b on b.userid = a.id where b.groupid=%d",
                 group.getId());
 
         MYSQL_RES *res = mysql.query(sql);
@@ -97,7 +97,7 @@ vector<Group> GroupModel::queryGroups(int userid)
 vector<int> GroupModel::queryGroupUsers(int userid, int groupid)
 {
     char sql[1024] = {0};
-    sprintf(sql, "select userid from groupuser where groupid = %d and userid != %d", groupid, userid);
+    sprintf(sql, "select userid from `GroupUser` where groupid = %d and userid != %d", groupid, userid);
 
     vector<int> idVec;
     MySQL mysql;

@@ -34,13 +34,13 @@ MySQL::~MySQL()
 bool MySQL::connect()
 {
     const string server = optionalEnvironment("CHAT_DB_HOST", "127.0.0.1");
-    const string user = optionalEnvironment("CHAT_DB_USER", "chatapp");
+    const string user = requiredEnvironment("CHAT_DB_USER");
     const string password = requiredEnvironment("CHAT_DB_PASSWORD");
     const string dbname = optionalEnvironment("CHAT_DB_NAME", "chat");
     const string portText = optionalEnvironment("CHAT_DB_PORT", "3306");
-    if (password.empty())
+    if (user.empty() || password.empty())
     {
-        LOG_ERROR << "CHAT_DB_PASSWORD is required; refusing an insecure default";
+        LOG_ERROR << "CHAT_DB_USER and CHAT_DB_PASSWORD are required";
         return false;
     }
 
