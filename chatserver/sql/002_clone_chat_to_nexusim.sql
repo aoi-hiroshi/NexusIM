@@ -46,16 +46,17 @@ BEGIN
     END IF;
 
     START TRANSACTION;
-    INSERT INTO `nexusim`.`User` (`id`, `name`, `password`, `state`)
-        SELECT `id`, `name`, `password`, 'offline' FROM `chat`.`User`;
-    INSERT INTO `nexusim`.`Friend` (`userid`, `friendid`)
-        SELECT `userid`, `friendid` FROM `chat`.`Friend`;
-    INSERT INTO `nexusim`.`AllGroup` (`id`, `groupname`, `groupdesc`)
-        SELECT `id`, `groupname`, `groupdesc` FROM `chat`.`AllGroup`;
-    INSERT INTO `nexusim`.`GroupUser` (`groupid`, `userid`, `grouprole`)
-        SELECT `groupid`, `userid`, `grouprole` FROM `chat`.`GroupUser`;
-    INSERT INTO `nexusim`.`OfflineMessage` (`userid`, `message`)
-        SELECT `userid`, `message` FROM `chat`.`OfflineMessage`;
+    -- Each target table was created LIKE its source table. Copy by physical
+    -- column order so the clone also works with course-schema column variants.
+    INSERT INTO `nexusim`.`User` SELECT * FROM `chat`.`User`;
+    INSERT INTO `nexusim`.`Friend` SELECT * FROM `chat`.`Friend`;
+    INSERT INTO `nexusim`.`AllGroup` SELECT * FROM `chat`.`AllGroup`;
+    INSERT INTO `nexusim`.`GroupUser` SELECT * FROM `chat`.`GroupUser`;
+    INSERT INTO `nexusim`.`OfflineMessage` SELECT * FROM `chat`.`OfflineMessage`;
+
+    -- Presence is reconstructed by login; never carry stale online state into
+    -- the isolated NexusIM database.
+    UPDATE `nexusim`.`User` SET `state` = 'offline';
     COMMIT;
 END//
 DELIMITER ;
