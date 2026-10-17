@@ -73,6 +73,7 @@ mysql -u Aoi_ -p < chatserver/sql/002_clone_chat_to_nexusim.sql
 
 ```bash
 python3 tests/stage1/server_frame_probe.py --host 127.0.0.1 --port 6000
+python3 tests/stage1/auth_probe.py --host 127.0.0.1 --port 6000
 ```
 
 集成验收还必须人工或自动记录：
