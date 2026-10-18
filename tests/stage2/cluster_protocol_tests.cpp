@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
-
 namespace
 {
 void require(bool condition, const char *message)
