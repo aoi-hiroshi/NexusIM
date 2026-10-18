@@ -14,6 +14,7 @@ Qt UI、UserService RPC 拆分和 AIService 尚未开发；Linux 真实集群结
 - `docs/linux-build-checklist.md`：后续 Linux 编译与依赖核查命令。
 - `docs/stage1-implementation.md`：阶段 1 设计、实际测试结果与 Linux 验收步骤。
 - `docs/stage2-cluster.md`：阶段 2 路由、部署、可靠性边界与可复现验收步骤。
+- `docs/v1-test-report.md`：当前 V1 测试结论、真实证据、未完成项和发布判定。
 - `deploy/`：双实例环境模板、Redis 模板、Nginx stream 配置与启动脚本。
 
 ## V1 边界

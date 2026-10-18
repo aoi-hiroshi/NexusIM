@@ -57,7 +57,7 @@ Windows 开发机没有 WSL/Muduo/MySQL/hiredis Linux 开发环境；Linux 结�
 - `session_security_probe.py` 实际通过：未认证心跳和禁用接口检查成功；认证心跳返回 `msgid=12, ok=true`；用户 5 向用户 4 发送包含伪造身份的消息后，接收方看到的仍是服务端认证的用户 5 及其真实用户名，且消息中没有 `session_id`。
 - `presence_probe.py` 使用用户 1 实际通过：登录获得 64 字符 session ID；Presence 初始 TTL 为 90 秒，等待后为 88 秒，认证心跳后恢复为 90 秒；错误 owner 的 compare-delete 返回 0，连接关闭后当前 Presence key 被安全删除。
 
-尚未据此宣称通过：MySQL 注册/登录、密码迁移、认证身份覆盖、Presence 续租/安全删除、跨节点单聊和 Redis 故障恢复。
+尚未据此宣称通过：旧明文密码升级后的最终数据库字段确认、SQL 特殊字符专项黑盒测试、跨节点单聊和 Redis 故障恢复。
 
 ## Linux 构建与验证
 
