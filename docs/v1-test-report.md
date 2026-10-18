@@ -2,14 +2,14 @@
 
 > 报告日期：2026-10-18（Asia/Shanghai）  
 > 被测提交：`718ff03979365822f16c9a139d94b85cc74481f6`  
-> 当前结论：**阶段 1 已达到当前范围的验收条件；阶段 2 源码与部署准备完成，但 Linux 双节点集群尚未完成最终验收；完整 V1 暂不具备发布条件。**
+> 当前结论：**阶段 1 已达到当前范围的验收条件；阶段 2 的 Linux 双节点、Redis Pub/Sub、Nginx Stream、Presence 和故障注入已通过当前范围验收；完整 V1 因 Stage 3 及后续模块尚未实现，暂不具备发布条件。**
 
 ## 1. 执行摘要
 
 - TCP 4 字节大端分帧、粘包/半包、多帧、非法长度、连接级顺序、有界执行器、独立心跳执行器和 PendingRequest 生命周期测试已经通过。
 - Linux 实机已验证 ChatServer 编译启动、注册登录、PBKDF2 新密码、服务端身份覆盖、未认证限制、心跳和 Redis Presence 的 TTL 续租及安全删除。
-- Stage 2 的集群协议单测、线程边界源码守卫和 Python 探针语法检查已经通过；Nginx 1.28.3 与动态 Stream 模块已安装。
-- 尚未取得双 ChatServer 跨节点 Pub/Sub、Nginx `:8000` 分流、Redis 停机、节点崩溃 TTL 的完整 Linux 通过日志，因此不能宣称集群验收通过。
+- Stage 2 的集群协议单测、线程边界源码守卫和 Python 探针语法检查已经通过；Linux 实机成功编译并启动两个 ChatServer，Redis 两个节点频道在空闲 10 秒后仍各保持 1 个订阅者。
+- 本节点直发、双向跨节点 Pub/Sub、跨节点重复登录、离线单次入库、Nginx `:8000` 轮询分流、Redis 停机显式失败与离线回退、节点崩溃后 TTL 清理均取得真实通过输出。
 - V1 规划中的 UserService/MPRPC 拆分、Qt 5.12.8 客户端、AIService、Docker Compose 尚未实现或验收。本报告不能作为完整 V1 发布批准。
 - 未执行吞吐量、P95/P99 延迟、长期稳定性或内存泄漏测试，本报告不提供任何推测性性能数据。
 
@@ -81,15 +81,15 @@
 | S1-16 | SQL 特殊字符/注入专项黑盒测试 | Linux | 待执行 | 代码使用连接字符集转义，但没有收到专项恶意输入测试输出 |
 | S2-01 | Presence/Delivery 编解码与非法值拒绝 | Windows | 通过 | `stage2_cluster_protocol_tests` 1/1 |
 | S2-02 | Redis 订阅线程与 Muduo 状态隔离 | Windows静态检查 | 通过 | `stage2_source_guards.py` |
-| S2-03 | Pub/Sub 空闲连接不因普通读超时退出 | Windows静态检查 | 通过 | 提交 `8838473`，源码守卫通过；Linux长时间空闲待验证 |
-| S2-04 | Presence 失败响应先发送再断开 | Windows静态检查 | 通过 | 提交 `718ff03`，源码守卫通过；Redis停机实测待执行 |
-| S2-05 | 同节点单聊 | Linux双节点 | 待执行 | `cluster_probe.py` 已具备测试逻辑 |
-| S2-06 | 双向跨节点 Redis Pub/Sub 单聊 | Linux双节点 | 待执行 | 尚无 `cluster_probe: PASS` 输出 |
-| S2-07 | 跨节点重复登录拒绝 | Linux双节点 | 待执行 | 探针预期 `errno=2` |
-| S2-08 | 离线消息仅发送节点写入一次 | Linux双节点 | 待执行 | 探针验证唯一一条离线消息 |
-| S2-09 | Nginx Stream 长连接分流 | Linux + Nginx | 待执行 | 模块已安装；尚无 `nginx -t`、`:8000` 和探针通过证据 |
-| S2-10 | Redis 停机显式错误与离线回退 | Linux故障注入 | 待执行 | `redis_failure_probe.py` 尚未执行完成 |
-| S2-11 | ChatServer 崩溃后的 Presence TTL 清理 | Linux故障注入 | 待执行 | `presence_crash_probe.py` 尚未执行完成 |
+| S2-03 | Pub/Sub 空闲连接不因普通读超时退出 | Windows + Linux | 通过 | `8838473`；Linux 等待 10 秒后两个频道订阅数仍为 1，随后登录和集群探针通过 |
+| S2-04 | Presence 失败响应先发送再断开 | Windows + Linux | 通过 | `718ff03`；Redis 停机探针收到显式 `PRESENCE_UNAVAILABLE` 并完整结束 |
+| S2-05 | 同节点单聊 | Linux双节点 | 通过 | 直连探针与完整探针均输出 `test 1 local direct chat: PASS` |
+| S2-06 | 双向跨节点 Redis Pub/Sub 单聊 | Linux双节点 | 通过 | A→B、B→A 均通过，`cluster_probe: PASS` |
+| S2-07 | 跨节点重复登录拒绝 | Linux双节点 | 通过 | 探针输出 `test 3 cross-node duplicate login: PASS` |
+| S2-08 | 离线消息仅发送节点写入一次 | Linux双节点 | 通过 | 探针输出 `offline sender-side single storage: PASS` |
+| S2-09 | Nginx Stream 长连接分流 | Linux + Nginx | 通过 | 配置检查成功，`:8000` 监听；6 个连接按 `chatserver-1:3 / chatserver-2:3` 分配 |
+| S2-10 | Redis 停机显式错误与离线回退 | Linux故障注入 | 通过 | `PRESENCE_UNAVAILABLE`、`queued_offline=true`，单次响应 0.428 秒 |
+| S2-11 | ChatServer 崩溃后的 Presence TTL 清理 | Linux故障注入 | 通过 | `SIGKILL` 所属节点后 key 按初始 TTL 90 秒过期 |
 | V1-01 | UserService 经 MPRPC 的 Login/Register/QueryUser | Linux | 未实现 | `mprpc/` 仍是课程工程源码快照，尚未完成业务拆分 |
 | V1-02 | Qt 5.12.8 登录、注册、单聊、AI窗口 | Windows | 未实现 | 当前阶段明确未开发 Qt UI |
 | V1-03 | AIService + LLM API | Linux | 未实现 | 尚未开发，不存在真实 API 测试 |
@@ -169,6 +169,85 @@ presence_probe: PASS (user_id=1)
 
 该结果支持“认证心跳刷新 TTL、旧 owner 不能删除当前 owner、当前连接断开后 key 删除”的结论。
 
+### 6.5 Stage 2 Linux 构建与双节点启动
+
+提交 `8838473` 和 `718ff03` 均在目标机重新增量构建，最终 `ChatServer` 链接成功。
+两个实例实际监听：
+
+```text
+127.0.0.1:6001  ChatServer-1
+127.0.0.1:6002  ChatServer-2
+```
+
+等待 10 秒后执行 `PUBSUB NUMSUB`：
+
+```text
+nexusim:chat:node:chatserver-1  1
+nexusim:chat:node:chatserver-2  1
+```
+
+随后执行直连测试，实际输出：
+
+```text
+test 1 local direct chat: PASS
+test 3 cross-node duplicate login: PASS
+test 2 bidirectional Redis cross-node chat: PASS
+test 4 authenticated Presence renewal: PASS
+recipient existence validation: PASS
+offline sender-side single storage: PASS
+exit_code=0
+```
+
+### 6.6 Nginx Stream
+
+目标机安装 Nginx `1.28.3-2ubuntu1.11` 和 `libnginx-mod-stream`，实际构建参数为
+`--with-stream=dynamic`。使用包内真实模块路径
+`/usr/lib/nginx/modules/ngx_stream_module.so` 生成独立运行配置后：
+
+```text
+nginx: configuration file /tmp/nexusim-nginx.conf test is successful
+LISTEN 0 511 0.0.0.0:8000
+```
+
+完整探针实际输出：
+
+```text
+test 1 local direct chat: PASS
+test 3 cross-node duplicate login: PASS
+test 2 bidirectional Redis cross-node chat: PASS
+test 4 authenticated Presence renewal: PASS
+recipient existence validation: PASS
+offline sender-side single storage: PASS
+test 5 Nginx stream distribution: PASS {'chatserver-1': 3, 'chatserver-2': 3}
+cluster_probe: PASS
+exit_code=0
+```
+
+### 6.7 Redis 故障注入
+
+操作者停止真实 Redis 服务并确认 `127.0.0.1:6379 Connection refused`。修复最终响应
+与关闭竞态后，探针实际输出：
+
+```text
+redis_failure_probe: PASS
+(explicit=PRESENCE_UNAVAILABLE, queued_offline=true, response_seconds=0.428)
+```
+
+`0.428` 秒只是本次单次观测，不是吞吐量或延迟指标。测试后 Redis 与两个
+ChatServer 均按预案重启；当前 V1 不实现 Redis 自动重连。
+
+### 6.8 节点崩溃 TTL
+
+用户 12 直连 `chatserver-1` 登录后，对所属 ChatServer 执行 `SIGKILL`，Redis 保持
+运行。实际结果：
+
+```text
+presence_crash_probe: PASS
+(key expired after owner crash, initial_ttl=90)
+```
+
+这证明节点异常退出时没有依赖全局状态重置，旧 Presence 最终由 TTL 清理。
+
 ## 7. 测试中发现并处理的问题
 
 | 问题 | 影响 | 处理状态 |
@@ -182,14 +261,14 @@ presence_probe: PASS (user_id=1)
 | Redis Pub/Sub 订阅 socket 使用普通读超时 | 频道空闲后订阅线程退出 | `8838473` 修复并加入源码守卫 |
 | Presence 失败时工作线程先 shutdown | 最终 `PRESENCE_LOST` 可能丢失 | `718ff03` 改为 EventLoop 内先发送再关闭 |
 | 文档占位路径 `/path/to/NexusIM` 被直接执行 | 构建和 deploy 相对路径全部失败 | 已确认真实根目录 `/home/aoi/NexusIM/NexusIM` |
-| `/tmp/nexusim-nginx.conf` 未生成 | Nginx 无法读取配置 | 已明确动态模块加载和运行配置生成步骤；尚待实机成功输出 |
+| `/tmp/nexusim-nginx.conf` 未生成或未加载动态模块 | Nginx 无法读取配置或报 `unknown directive "stream"` | 从已安装包取得模块路径后生成配置，`nginx -t`、`:8000` 和 3/3 分流实测通过 |
 
 ## 8. 已知限制与风险
 
 1. **无 TLS。** 客户端密码、消息和 Redis 链路不具备传输加密，只能在隔离测试网络运行。
 2. **Pub/Sub 不可靠。** 没有端到端 ACK、重试、去重或持久化消费；订阅者断开、队列满或 Presence 竞态时可能丢消息。
 3. **单 Redis 故障域。** 当前阶段没有 Redis Sentinel/Cluster；Redis 不可用时登录和续租按 fail-closed 处理。
-4. **最近修复缺少 Linux 集群回归。** `8838473` 和 `718ff03` 已通过本地源码守卫，但必须用真实空闲连接和 Redis 停机测试确认。
+4. **Redis 不自动重连。** Redis 中断后当前进程按 fail-closed 处理，恢复 Redis 后仍需重启两个 ChatServer；自动退避重连不在 Stage 2 范围。
 5. **安全验证仍不完整。** SQL 转义已实现，但缺少单引号、超长 UTF-8、畸形 JSON 批量输入等专项黑盒记录。
 6. **没有性能结论。** 未执行并发连接、吞吐量、延迟分位、长稳、资源占用和 Valgrind/ASan，因此不能给出容量指标。
 7. **完整 V1 功能缺口。** RPC UserService、Qt5 客户端、AIService 和 Docker Compose 未完成。
@@ -202,38 +281,28 @@ presence_probe: PASS (user_id=1)
 
 ### Stage 2
 
-**结论：暂不通过最终验收。** 源码、配置、探针和本地协议测试已准备好，但缺少 Linux 双节点和故障注入的实际通过输出。
+**结论：通过当前范围验收。** Linux 双节点本地与跨节点路由、重复登录、离线单次入库、Nginx 分流、Presence 生命周期、Redis 停机及节点崩溃 TTL 均有真实通过输出。该结论不扩展为端到端可靠投递、自动重连、TLS 或生产发布批准。
 
 ### 完整 V1
 
 **结论：不通过发布验收。** 原因不是现有测试失败，而是 UserService RPC、Qt5、AIService、Docker Compose 等承诺范围尚未实现。
 
-## 10. 下一轮必跑验收
+## 10. Stage 3 准入与保留回归
 
-按顺序执行并保存完整输出：
+Stage 2 准入条件已经满足，可以开始 MPRPC + UserService 阶段。Stage 3 修改期间必须
+继续保留以下回归门槛：
 
 ```bash
-# 两个节点和 Redis 订阅
-ss -ltnp | grep -E ':6001|:6002'
-redis-cli PUBSUB NUMSUB \
-  nexusim:chat:node:chatserver-1 \
-  nexusim:chat:node:chatserver-2
-
-# Nginx 配置、入口与完整集群
-sudo nginx -t -c "$NGINX_CONFIG"
-ss -ltnp | grep ':8000'
+ctest --test-dir build/stage1-tests --output-on-failure
+ctest --test-dir build/stage2-tests --output-on-failure
+python3 tests/stage1/server_frame_probe.py --port 6001
+python3 tests/stage1/session_security_probe.py --port 6001
 python3 tests/stage2/cluster_probe.py
-
-# 故障注入
-python3 tests/stage2/redis_failure_probe.py
-python3 tests/stage2/presence_crash_probe.py --port 6001 --user-id <id>
-
-# SQL 特殊输入与旧密码最终确认
-sudo mysql -D nexusim -e \
-  'SELECT id,name,LEFT(password,20),state FROM `User` WHERE id=1;'
 ```
 
-只有 `cluster_probe: PASS`、Redis 故障探针、节点崩溃 TTL 探针均通过后，才能把 Stage 2 改为通过。完整 V1 还需后续阶段分别提交对应测试记录。
+仍建议单独补充但不冒充已执行的安全证据：包含单引号、超长 UTF-8、畸形 JSON 的
+专项输入测试，以及旧账号密码升级后的最终 SQL 输出。Stage 3 还必须新增真实 RPC
+超时、UserService 不可用、ZooKeeper 不可用和 EventLoop 不阻塞测试。
 
 ## 11. 可追溯证据
 

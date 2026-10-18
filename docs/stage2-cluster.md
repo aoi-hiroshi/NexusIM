@@ -288,9 +288,9 @@ python3 tests/stage1/session_security_probe.py --port 6001
 
 ## 10. 验收记录边界
 
-Windows 仅能真实验证不依赖 Muduo/hiredis/MySQL/Nginx 的 C++ 协议单测、Stage 1
-公共组件回归、Python 语法和源码线程边界 guard。双 ChatServer、Redis、MySQL、
-Nginx 与故障注入结果必须在 Linux 目标机实际执行后记录；未执行前不得标为通过。
+Windows 仅验证不依赖 Muduo/hiredis/MySQL/Nginx 的 C++ 协议单测、Stage 1 公共组件
+回归、Python 语法和源码线程边界 guard。双 ChatServer、Redis、MySQL、Nginx 与
+故障注入使用 Linux 目标机的独立证据，不用 Windows 结果替代。
 
 ### 2026-10-18 Windows 实际结果
 
@@ -303,5 +303,12 @@ Nginx 与故障注入结果必须在 Linux 目标机实际执行后记录；未�
 - Stage 2 协议测试：`stage2_cluster_protocol_tests` 1/1 通过。
 - `stage2_source_guards.py`：通过。
 - `python -m compileall -q tests/stage2`：通过。
-- 未在 Windows 声称通过：ChatServer Linux 链接、真实 MySQL/Redis、双节点 Pub/Sub、
-  Nginx stream、Redis 停机与节点崩溃 TTL。这些均待 Linux 实机按本章执行。
+- 未用 Windows 结果宣称通过 ChatServer Linux 链接、真实 MySQL/Redis、双节点
+  Pub/Sub、Nginx stream、Redis 停机或节点崩溃 TTL。
+
+### 2026-10-18 Linux 实际结果
+
+目标机已真实完成 ChatServer 编译、两个节点订阅空闲保持、同节点与双向跨节点单聊、
+重复登录拒绝、离线单次入库、Nginx 3/3 分流、Redis 停机显式离线回退以及节点
+`SIGKILL` 后 90 秒 TTL 清理。完整命令输出、缺陷修复和非生产边界见
+[`v1-test-report.md`](v1-test-report.md)。

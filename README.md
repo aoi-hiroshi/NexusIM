@@ -2,8 +2,8 @@
 
 NexusIM 是基于施磊课程 ChatServer 与 MPRPC 示例代码演进的 C++17 分布式即时通信项目。
 
-当前仓库已完成 **阶段 2：Redis Pub/Sub + Nginx 双节点集群源码与部署准备**。
-Qt UI、UserService RPC 拆分和 AIService 尚未开发；Linux 真实集群结果仍需在目标机验收。
+当前仓库已完成并实机验证 **阶段 2：Redis Pub/Sub + Nginx 双节点集群**。
+Qt UI、UserService RPC 拆分和 AIService 尚未开发；完整 V1 仍不具备发布条件。
 
 ## 当前目录
 
@@ -27,6 +27,6 @@ V1 不承诺 ACK 可靠投递、多设备同步、复杂历史、RPC 多实例�
 
 ## 构建状态
 
-平台无关核心测试在 VS2019 下执行；本机没有 WSL/Muduo/MySQL/hiredis Linux 环境，
-Linux 服务端和真实 Redis/Nginx 集群必须在目标机验证。命令及真实边界见
-`docs/stage1-implementation.md` 和 `docs/stage2-cluster.md`。
+平台无关核心测试在 VS2019 下通过；Linux 目标机已完成 ChatServer 编译、双节点
+Redis Pub/Sub、Nginx 3/3 分流、Redis 故障回退和节点崩溃 TTL 验证。真实证据、
+尚未执行项及非生产边界见 `docs/v1-test-report.md`。
