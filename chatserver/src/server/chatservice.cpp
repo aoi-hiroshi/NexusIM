@@ -288,8 +288,7 @@ void ChatService::login(const muduo::net::TcpConnectionPtr &connection,
         redis_.releasePresence(id, nodeId_, connection->name(), sessionId);
         response["errno"] = 5;
         response["errmsg"] = "database state update failed";
-        nexusim::sendFramed(connection, response.dump());
-        connection->shutdown();
+        nexusim::sendFramedAndShutdown(connection, response.dump());
         return;
     }
     response["errno"] = 0;

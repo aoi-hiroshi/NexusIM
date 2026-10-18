@@ -35,6 +35,34 @@ inline void sendFramed(const muduo::net::TcpConnectionPtr &connection,
     });
 }
 
+// Use this when a worker must return a final protocol frame and then close.
+// Queuing both operations together prevents shutdown() from changing the
+// connection state before a separately queued send callback can run.
+inline void sendFramedAndShutdown(
+    const muduo::net::TcpConnectionPtr &connection,
+    const std::string &payload)
+{
+    if (!connection) return;
+    const std::string frame = FrameCodec::encode(payload);
+    std::weak_ptr<muduo::net::TcpConnection> weakConnection(connection);
+    const auto sendAndShutdown = [weakConnection, frame] {
+        const auto liveConnection = weakConnection.lock();
+        if (liveConnection && liveConnection->connected())
+        {
+            liveConnection->send(frame);
+            liveConnection->shutdown();
+        }
+    };
+    if (connection->getLoop()->isInLoopThread())
+    {
+        sendAndShutdown();
+    }
+    else
+    {
+        connection->getLoop()->queueInLoop(sendAndShutdown);
+    }
+}
+
 } // namespace nexusim
 
 #endif

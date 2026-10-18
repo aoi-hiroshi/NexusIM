@@ -52,7 +52,8 @@ CLI client --4-byte BE frame--> Nginx stream :8000
 3. 注销或正常断线时，通过 Lua 比较完整 value 后删除；旧 session 无法删除新值。
 4. 节点崩溃不会执行全局重置，key 最终由 TTL 过期。
 5. Redis 或订阅连接不可用时，新登录失败关闭；续租失败返回 `PRESENCE_LOST`
-   并关闭连接。
+   并关闭连接。最终错误帧与 shutdown 在同一个 EventLoop 回调中按顺序执行，避免
+   工作线程提前改变连接状态而丢失错误响应。
 
 不同 ChatServer 必须使用不同的 `CHAT_NODE_ID`。相同 node ID 会导致两个订阅者
 竞争同一节点频道；发布端会记录 subscriber count 异常，但这种配置不受支持。

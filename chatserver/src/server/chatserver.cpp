@@ -167,8 +167,14 @@ void ChatServer::dispatchHeartbeat(const muduo::net::TcpConnectionPtr &connectio
                 response["error"] = "PRESENCE_LOST";
                 service_->invalidateSession(session);
             }
-            nexusim::sendFramed(liveConnection, response.dump());
-            if (!renewed) liveConnection->shutdown();
+            if (renewed)
+            {
+                nexusim::sendFramed(liveConnection, response.dump());
+            }
+            else
+            {
+                nexusim::sendFramedAndShutdown(liveConnection, response.dump());
+            }
         }))
     {
         pendingRequests_.cancel(registryRequestId);

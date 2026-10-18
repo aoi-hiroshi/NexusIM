@@ -7,6 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 REDIS_SOURCE = ROOT / "chatserver/src/server/redis/redis.cpp"
 SERVICE_SOURCE = ROOT / "chatserver/src/server/chatservice.cpp"
+CHATSERVER_SOURCE = ROOT / "chatserver/src/server/chatserver.cpp"
+WIRE_PROTOCOL = ROOT / "chatserver/include/server/wireprotocol.hpp"
 
 
 def function_body(source: str, signature: str, next_signature: str) -> str:
@@ -17,12 +19,21 @@ def function_body(source: str, signature: str, next_signature: str) -> str:
 
 redis_source = REDIS_SOURCE.read_text(encoding="utf-8")
 service_source = SERVICE_SOURCE.read_text(encoding="utf-8")
+chatserver_source = CHATSERVER_SOURCE.read_text(encoding="utf-8")
+wire_protocol = WIRE_PROTOCOL.read_text(encoding="utf-8")
 
 if "subscribeContext_ = connectContext(host, port, false)" not in redis_source:
     raise AssertionError("Pub/Sub connection must not time out while the channel is idle")
 if "publishContext_ = connectContext(host, port, true)" not in redis_source or \
         "presenceContext_ = connectContext(host, port, true)" not in redis_source:
     raise AssertionError("synchronous Redis command connections require bounded timeouts")
+
+if "sendFramedAndShutdown" not in wire_protocol or \
+        wire_protocol.index("liveConnection->send(frame)") > \
+        wire_protocol.index("liveConnection->shutdown()"):
+    raise AssertionError("final frame must be sent before EventLoop shutdown")
+if "sendFramedAndShutdown(liveConnection, response.dump())" not in chatserver_source:
+    raise AssertionError("failed heartbeat must atomically send PRESENCE_LOST before shutdown")
 
 observer = function_body(
     redis_source,
