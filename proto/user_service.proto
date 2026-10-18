@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package nexusim.user;
+
+option cc_generic_services = true;
+
+enum UserErrorCode {
+  USER_ERROR_OK = 0;
+  USER_ERROR_INVALID_ARGUMENT = 1;
+  USER_ERROR_INVALID_CREDENTIALS = 2;
+  USER_ERROR_NOT_FOUND = 3;
+  USER_ERROR_DATABASE = 4;
+  USER_ERROR_PASSWORD_HASH = 5;
+  USER_ERROR_INTERNAL = 6;
+}
+
+message UserResult {
+  UserErrorCode code = 1;
+  string message = 2;
+}
+
+message PublicUser {
+  int32 user_id = 1;
+  string username = 2;
+}
+
+message LoginRequest {
+  int32 user_id = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  UserResult result = 1;
+  bool authenticated = 2;
+  PublicUser user = 3;
+}
+
+message RegisterRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message RegisterResponse {
+  UserResult result = 1;
+  bool registered = 2;
+  PublicUser user = 3;
+}
+
+message QueryUserRequest {
+  int32 user_id = 1;
+}
+
+message QueryUserResponse {
+  UserResult result = 1;
+  bool found = 2;
+  PublicUser user = 3;
+}
+
+service UserService {
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc QueryUser(QueryUserRequest) returns (QueryUserResponse);
+}

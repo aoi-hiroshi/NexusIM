@@ -7,6 +7,8 @@
 #include <muduo/base/Logging.h>
 
 #include <cstdlib>
+#include <condition_variable>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -45,6 +47,23 @@ bool intField(const json &value, const char *name, int &result)
     if (it == value.end() || !it->is_number_integer()) return false;
     result = it->get<int>();
     return true;
+}
+
+const char *rpcErrorName(mprpc::RpcErrorCode code)
+{
+    switch (code)
+    {
+    case mprpc::RpcErrorCode::DeadlineExceeded:
+        return "RPC_TIMEOUT";
+    case mprpc::RpcErrorCode::ServerBusy:
+        return "RPC_SERVER_BUSY";
+    case mprpc::RpcErrorCode::DiscoveryUnavailable:
+        return "ZOOKEEPER_UNAVAILABLE";
+    case mprpc::RpcErrorCode::ServiceNotFound:
+        return "USER_SERVICE_UNAVAILABLE";
+    default:
+        return "RPC_UNAVAILABLE";
+    }
 }
 } // namespace
 
@@ -105,6 +124,7 @@ void ChatService::connectionOpened(const muduo::net::TcpConnectionPtr &connectio
 {
     nexusim::SessionContext context;
     context.connectionId = connection->name();
+    context.lifecycleId = nexusim::generateSessionId();
     std::lock_guard<std::mutex> lock(connectionMutex_);
     sessions_[context.connectionId] = std::move(context);
 }
@@ -131,21 +151,17 @@ std::optional<nexusim::SessionContext> ChatService::detachConnection(
 void ChatService::cleanupSession(const nexusim::SessionContext &session)
 {
     if (!session.authenticated) return;
-    if (redis_.releasePresence(session.userId, nodeId_, session.connectionId,
-                               session.sessionId))
-    {
-        User user(session.userId, "", "", "offline");
-        if (!userModel_.updateState(user))
-        {
-            LOG_ERROR << "node=" << nodeId_ << " failed to persist offline state user="
-                      << session.userId;
-        }
-    }
-    else
+    if (!redis_.releasePresence(session.userId, nodeId_, session.connectionId,
+                                session.sessionId))
     {
         LOG_WARN << "node=" << nodeId_ << " did not release Presence for user="
                  << session.userId << "; key is stale, unavailable, or owned by a newer session";
     }
+}
+
+void ChatService::cancelPendingRequests(const nexusim::SessionContext &session)
+{
+    rpcRequests_.cancelConnection(session.connectionId, session.lifecycleId);
 }
 
 std::optional<nexusim::SessionContext> ChatService::sessionFor(
@@ -194,6 +210,85 @@ const std::string &ChatService::nodeId() const noexcept
     return nodeId_;
 }
 
+std::chrono::milliseconds ChatService::rpcTimeout() const
+{
+    const int configured = environmentInt("CHAT_RPC_DEADLINE_MS", 2000);
+    return std::chrono::milliseconds(
+        configured < 100 || configured > 30000 ? 2000 : configured);
+}
+
+bool ChatService::isCurrentLifecycle(
+    const nexusim::SessionContext &session) const
+{
+    std::lock_guard<std::mutex> lock(connectionMutex_);
+    const auto current = sessions_.find(session.connectionId);
+    return current != sessions_.end() &&
+           current->second.lifecycleId == session.lifecycleId;
+}
+
+std::string ChatService::beginRpcRequest(
+    const nexusim::SessionContext &session,
+    nexusim::PendingRequestRegistry::Clock::time_point deadline)
+{
+    const std::string requestId = nodeId_ + "-rpc-" +
+                                  std::to_string(nextRpcRequestId_.fetch_add(1));
+    if (!rpcRequests_.add(
+            {requestId, session.connectionId, session.lifecycleId, deadline}))
+        return "";
+    return requestId;
+}
+
+bool ChatService::completeRpcRequest(
+    const std::string &requestId, const nexusim::SessionContext &session,
+    bool allowExpired)
+{
+    const auto completion = rpcRequests_.complete(
+        requestId, session.connectionId, session.lifecycleId);
+    return (completion == nexusim::PendingRequestRegistry::Completion::Completed ||
+            (allowExpired &&
+             completion == nexusim::PendingRequestRegistry::Completion::Expired)) &&
+           isCurrentLifecycle(session);
+}
+
+bool ChatService::bindAuthenticatedOnLoop(
+    const muduo::net::TcpConnectionPtr &connection, int userId,
+    const std::string &userName, const std::string &sessionId,
+    nexusim::PendingRequestRegistry::Clock::time_point deadline)
+{
+    struct CommitState
+    {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool cancelled{false};
+        bool finished{false};
+        bool result{false};
+    };
+
+    auto state = std::make_shared<CommitState>();
+    std::weak_ptr<muduo::net::TcpConnection> weakConnection(connection);
+    connection->getLoop()->queueInLoop(
+        [this, state, weakConnection, userId, userName, sessionId] {
+            std::unique_lock<std::mutex> lock(state->mutex);
+            if (state->cancelled) return;
+            const auto liveConnection = weakConnection.lock();
+            state->result = liveConnection && liveConnection->connected() &&
+                            bindAuthenticated(liveConnection, userId, userName,
+                                              sessionId);
+            state->finished = true;
+            lock.unlock();
+            state->changed.notify_one();
+        });
+
+    std::unique_lock<std::mutex> lock(state->mutex);
+    if (!state->changed.wait_until(lock, deadline,
+                                   [&state] { return state->finished; }))
+    {
+        state->cancelled = true;
+        return false;
+    }
+    return state->result;
+}
+
 bool ChatService::bindAuthenticated(const muduo::net::TcpConnectionPtr &connection,
                                     int userId, const std::string &userName,
                                     const std::string &sessionId)
@@ -231,22 +326,43 @@ void ChatService::login(const muduo::net::TcpConnectionPtr &connection,
         return;
     }
 
-    User user = userModel_.query(id);
-    bool passwordMatches = user.getId() == id &&
-                           nexusim::PasswordHasher::verify(password, user.getPwd());
-    if (!passwordMatches && user.getId() == id &&
-        !nexusim::PasswordHasher::isEncoded(user.getPwd()) && user.getPwd() == password)
-    {
-        const std::string migrated = nexusim::PasswordHasher::hash(password);
-        passwordMatches = userModel_.updatePassword(id, migrated);
-    }
-
     json response;
     response["msgid"] = LOGIN_MSG_ACK;
-    if (!passwordMatches)
+    const auto deadline = nexusim::PendingRequestRegistry::Clock::now() + rpcTimeout();
+    const std::string rpcRequestId = beginRpcRequest(*existing, deadline);
+    if (rpcRequestId.empty())
+    {
+        response["errno"] = 6;
+        response["error"] = "SERVER_BUSY";
+        response["errmsg"] = "could not track login RPC";
+        nexusim::sendFramed(connection, response.dump());
+        return;
+    }
+
+    const auto rpcResult = userServiceClient_.login(id, password, deadline);
+    const bool allowExpired = !rpcResult.call.ok &&
+                              rpcResult.call.error ==
+                                  mprpc::RpcErrorCode::DeadlineExceeded;
+    if (!completeRpcRequest(rpcRequestId, *existing, allowExpired))
+    {
+        // The connection was closed/replaced or the request deadline elapsed.
+        return;
+    }
+    if (!rpcResult.call.ok)
+    {
+        response["errno"] = 6;
+        response["error"] = rpcErrorName(rpcResult.call.error);
+        response["errmsg"] = rpcResult.call.message;
+        nexusim::sendFramed(connection, response.dump());
+        return;
+    }
+    if (!rpcResult.authenticated || rpcResult.userId != id)
     {
         response["errno"] = 1;
-        response["errmsg"] = "id or password is invalid";
+        response["error"] = "INVALID_CREDENTIALS";
+        response["errmsg"] = rpcResult.userMessage.empty()
+                                  ? "id or password is invalid"
+                                  : rpcResult.userMessage;
         nexusim::sendFramed(connection, response.dump());
         return;
     }
@@ -271,29 +387,19 @@ void ChatService::login(const muduo::net::TcpConnectionPtr &connection,
         nexusim::sendFramed(connection, response.dump());
         return;
     }
-    if (!bindAuthenticated(connection, id, user.getName(), sessionId))
+    if (!bindAuthenticatedOnLoop(connection, id, rpcResult.username, sessionId,
+                                 deadline))
     {
         redis_.releasePresence(id, nodeId_, connection->name(), sessionId);
         response["errno"] = 3;
         response["errmsg"] = "connection closed or login state changed";
-        nexusim::sendFramed(connection, response.dump());
+        if (connection->connected()) nexusim::sendFramed(connection, response.dump());
         return;
     }
 
-    user.setState("online");
-    if (!userModel_.updateState(user))
-    {
-        const auto boundSession = sessionFor(connection);
-        if (boundSession) invalidateSession(*boundSession);
-        redis_.releasePresence(id, nodeId_, connection->name(), sessionId);
-        response["errno"] = 5;
-        response["errmsg"] = "database state update failed";
-        nexusim::sendFramedAndShutdown(connection, response.dump());
-        return;
-    }
     response["errno"] = 0;
-    response["id"] = user.getId();
-    response["name"] = user.getName();
+    response["id"] = rpcResult.userId;
+    response["name"] = rpcResult.username;
     response["session_id"] = sessionId;
     response["node_id"] = nodeId_;
 
@@ -341,20 +447,42 @@ void ChatService::reg(const muduo::net::TcpConnectionPtr &connection,
         return;
     }
 
-    User user;
-    user.setName(name);
-    user.setPwd(nexusim::PasswordHasher::hash(password));
     json response;
     response["msgid"] = REG_MSG_ACK;
-    if (userModel_.insert(user))
+    const auto deadline = nexusim::PendingRequestRegistry::Clock::now() + rpcTimeout();
+    const std::string rpcRequestId = beginRpcRequest(*session, deadline);
+    if (rpcRequestId.empty())
+    {
+        response["errno"] = 2;
+        response["error"] = "SERVER_BUSY";
+        response["errmsg"] = "could not track register RPC";
+        nexusim::sendFramed(connection, response.dump());
+        return;
+    }
+
+    const auto rpcResult = userServiceClient_.registerUser(name, password, deadline);
+    const bool allowExpired = !rpcResult.call.ok &&
+                              rpcResult.call.error ==
+                                  mprpc::RpcErrorCode::DeadlineExceeded;
+    if (!completeRpcRequest(rpcRequestId, *session, allowExpired)) return;
+    if (!rpcResult.call.ok)
+    {
+        response["errno"] = 2;
+        response["error"] = rpcErrorName(rpcResult.call.error);
+        response["errmsg"] = rpcResult.call.message;
+    }
+    else if (rpcResult.registered)
     {
         response["errno"] = 0;
-        response["id"] = user.getId();
+        response["id"] = rpcResult.userId;
     }
     else
     {
         response["errno"] = 1;
-        response["errmsg"] = "registration failed";
+        response["error"] = "REGISTER_FAILED";
+        response["errmsg"] = rpcResult.userMessage.empty()
+                                  ? "registration failed"
+                                  : rpcResult.userMessage;
     }
     nexusim::sendFramed(connection, response.dump());
 }
@@ -508,17 +636,37 @@ void ChatService::storeOfflineOrReport(
     const std::string &payload, const std::string &errorCode,
     const std::string &errorMessage)
 {
-    bool recipientCheckSucceeded = false;
-    if (!userModel_.exists(recipientId, recipientCheckSucceeded))
+    const auto session = sessionFor(sender);
+    if (!session || !session->authenticated) return;
+    const auto deadline = nexusim::PendingRequestRegistry::Clock::now() + rpcTimeout();
+    const std::string rpcRequestId = beginRpcRequest(*session, deadline);
+    if (rpcRequestId.empty())
     {
-        sendError(sender, ONE_CHAT_MSG,
-                  recipientCheckSucceeded ? "RECIPIENT_NOT_FOUND"
-                                          : "RECIPIENT_CHECK_FAILED",
-                  recipientCheckSucceeded ? "recipient does not exist"
-                                          : "recipient could not be validated",
-                  recipientId, false);
+        sendError(sender, ONE_CHAT_MSG, "SERVER_BUSY",
+                  "could not track recipient query", recipientId, false);
         return;
     }
+
+    const auto rpcResult = userServiceClient_.queryUser(recipientId, deadline);
+    const bool allowExpired = !rpcResult.call.ok &&
+                              rpcResult.call.error ==
+                                  mprpc::RpcErrorCode::DeadlineExceeded;
+    if (!completeRpcRequest(rpcRequestId, *session, allowExpired) ||
+        !isCurrentSession(*session))
+        return;
+    if (!rpcResult.call.ok)
+    {
+        sendError(sender, ONE_CHAT_MSG, rpcErrorName(rpcResult.call.error),
+                  rpcResult.call.message, recipientId, false);
+        return;
+    }
+    if (!rpcResult.found)
+    {
+        sendError(sender, ONE_CHAT_MSG, "RECIPIENT_NOT_FOUND",
+                  "recipient does not exist", recipientId, false);
+        return;
+    }
+
     const bool stored = offlineMessageModel_.insert(recipientId, payload);
     if (!stored)
     {

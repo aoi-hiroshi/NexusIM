@@ -30,12 +30,12 @@ V1 的“异步 RPC”指：MPRPC 底层仍可使用同步调用，但同步调�
 请求流程：
 
 1. EventLoop 解出完整客户端帧并完成大小、类型和登录状态检查。
-2. 为请求生成 `PendingRequest`，记录 `request_id`、`connection_id`、`session_id`、原 I/O Loop 和 deadline。
+2. 为请求生成 `PendingRequest`，记录 `request_id`、`connection_id`、认证后的 `session_id`（未认证登录/注册使用随机 `lifecycle_id`）、原 I/O Loop 和 deadline。
 3. 把任务提交到有界工作线程。
 4. 工作线程执行带 connect/read/write 总超时的 MPRPC 调用。
-5. 工作线程不得直接修改连接表、Presence 或 UI 协议状态。
+5. 工作线程可以执行有界的 RPC、MySQL 和 Redis 条件操作，但不得直接修改连接表或认证 Session；Presence 占用必须携带本次随机 `session_id`，并在 Session 提交失败时比较后回滚。
 6. RPC 完成后，通过原 I/O Loop 的 `queueInLoop/runInLoop` 回投完成事件。
-7. I/O Loop 再次检查：连接仍存在、仍处于 connected 状态、`session_id` 未变化、请求尚未超时且未取消。
+7. I/O Loop 再次检查：连接仍存在、仍处于 connected 状态、`lifecycle_id/session_id` 未变化、请求尚未取消；超时 RPC 只允许返回明确超时错误，不能提交业务结果。
 8. 只有全部检查通过才发送响应；迟到结果直接丢弃并记录原因。
 
 断开连接时：

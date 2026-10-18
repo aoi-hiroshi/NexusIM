@@ -1,8 +1,11 @@
 # NexusIM V1 测试报告
 
 > 报告日期：2026-10-18（Asia/Shanghai）  
-> 被测提交：`718ff03979365822f16c9a139d94b85cc74481f6`  
-> 当前结论：**阶段 1 已达到当前范围的验收条件；阶段 2 的 Linux 双节点、Redis Pub/Sub、Nginx Stream、Presence 和故障注入已通过当前范围验收；完整 V1 因 Stage 3 及后续模块尚未实现，暂不具备发布条件。**
+> Stage 2 Linux 被测提交：`718ff03979365822f16c9a139d94b85cc74481f6`
+>
+> Stage 3 Windows 被测源码：本报告所在 Stage 3 交付提交
+>
+> 当前结论：**阶段 1、阶段 2 已达到当前范围的验收条件；阶段 3 源码与 Windows 可移植测试已完成，但 Linux MPRPC/UserService 编译和集成测试尚未执行；完整 V1 暂不具备发布条件。**
 
 ## 1. 执行摘要
 
@@ -10,7 +13,8 @@
 - Linux 实机已验证 ChatServer 编译启动、注册登录、PBKDF2 新密码、服务端身份覆盖、未认证限制、心跳和 Redis Presence 的 TTL 续租及安全删除。
 - Stage 2 的集群协议单测、线程边界源码守卫和 Python 探针语法检查已经通过；Linux 实机成功编译并启动两个 ChatServer，Redis 两个节点频道在空闲 10 秒后仍各保持 1 个订阅者。
 - 本节点直发、双向跨节点 Pub/Sub、跨节点重复登录、离线单次入库、Nginx `:8000` 轮询分流、Redis 停机显式失败与离线回退、节点崩溃后 TTL 清理均取得真实通过输出。
-- V1 规划中的 UserService/MPRPC 拆分、Qt 5.12.8 客户端、AIService、Docker Compose 尚未实现或验收。本报告不能作为完整 V1 发布批准。
+- Stage 3 已完成 MPRPC 双向分帧、总 Deadline、Provider 线程隔离和 UserService 源码；Windows RPC 帧测试及 Stage 1/2 回归通过，Linux 真实 RPC 仍待验收。
+- V1 规划中的 Qt 5.12.8 客户端、AIService、Docker Compose 尚未实现或验收。本报告不能作为完整 V1 发布批准。
 - 未执行吞吐量、P95/P99 延迟、长期稳定性或内存泄漏测试，本报告不提供任何推测性性能数据。
 
 ## 2. 测试范围与判定规则
@@ -19,7 +23,8 @@
 
 1. Stage 1：TCP FrameCodec、业务线程隔离、connection strand、PendingRequest、认证会话、密码安全、MySQL schema、Redis Presence。
 2. Stage 2：Redis Pub/Sub 路由协议、双 ChatServer 部署脚本、Nginx Stream 配置、集群与故障探针。
-3. 已规划但尚未实现的 V1 模块仅记录缺口，不按“失败”伪装成已执行测试。
+3. Stage 3：MPRPC 帧协议、Controller Deadline、Provider 有界执行器、独立 UserService、ChatService RPC 接入及目标机探针。
+4. 已规划但尚未实现的 V1 模块仅记录缺口，不按“失败”伪装成已执行测试。
 
 状态含义：
 
@@ -90,7 +95,13 @@
 | S2-09 | Nginx Stream 长连接分流 | Linux + Nginx | 通过 | 配置检查成功，`:8000` 监听；6 个连接按 `chatserver-1:3 / chatserver-2:3` 分配 |
 | S2-10 | Redis 停机显式错误与离线回退 | Linux故障注入 | 通过 | `PRESENCE_UNAVAILABLE`、`queued_offline=true`，单次响应 0.428 秒 |
 | S2-11 | ChatServer 崩溃后的 Presence TTL 清理 | Linux故障注入 | 通过 | `SIGKILL` 所属节点后 key 按初始 TTL 90 秒过期 |
-| V1-01 | UserService 经 MPRPC 的 Login/Register/QueryUser | Linux | 未实现 | `mprpc/` 仍是课程工程源码快照，尚未完成业务拆分 |
+| S3-01 | RPC 4 字节大端帧：半包/粘包/多帧/非法长度/>1024 | Windows | 通过 | `stage3_rpc_frame_tests` 1/1；Protobuf/Provider 实机部分待 Linux |
+| S3-02 | MPRPC/UserService 线程与安全边界源码守卫 | Windows静态检查 | 通过 | `stage3_source_guards.py` |
+| S3-03 | UserService Login/Register/QueryUser 真实 RPC | Linux | 待执行 | 已提供 `stage3_user_service_rpc_probe`，不得提前记为通过 |
+| S3-04 | UserService/ZooKeeper 不可用和总超时 | Linux故障注入 | 待执行 | 已提供 `rpc_failure_probe.py` |
+| S3-05 | 慢 RPC 期间 heartbeat 不阻塞 | Linux双连接 | 待执行 | 已提供 `eventloop_nonblocking_probe.py` |
+| S3-06 | RPC 中途断线不发送旧结果且不留 Presence | Linux | 待执行 | 已提供 `rpc_lifecycle_probe.py` |
+| V1-01 | UserService 经 MPRPC 的 Login/Register/QueryUser | Linux | 源码完成/待验收 | Windows 可移植测试通过；Linux 构建、ZooKeeper 注册和真实 MySQL RPC 待执行 |
 | V1-02 | Qt 5.12.8 登录、注册、单聊、AI窗口 | Windows | 未实现 | 当前阶段明确未开发 Qt UI |
 | V1-03 | AIService + LLM API | Linux | 未实现 | 尚未开发，不存在真实 API 测试 |
 | V1-04 | Docker Compose 全栈启动 | Linux | 未实现/待执行 | 当前只有 Stage 2 部署配置和脚本，未完成全栈 Compose 验收 |
@@ -271,7 +282,7 @@ presence_crash_probe: PASS
 4. **Redis 不自动重连。** Redis 中断后当前进程按 fail-closed 处理，恢复 Redis 后仍需重启两个 ChatServer；自动退避重连不在 Stage 2 范围。
 5. **安全验证仍不完整。** SQL 转义已实现，但缺少单引号、超长 UTF-8、畸形 JSON 批量输入等专项黑盒记录。
 6. **没有性能结论。** 未执行并发连接、吞吐量、延迟分位、长稳、资源占用和 Valgrind/ASan，因此不能给出容量指标。
-7. **完整 V1 功能缺口。** RPC UserService、Qt5 客户端、AIService 和 Docker Compose 未完成。
+7. **完整 V1 功能缺口。** RPC UserService 尚待 Linux 实机验收；Qt5 客户端、AIService 和 Docker Compose 未完成。
 
 ## 9. 发布判定
 
@@ -283,14 +294,18 @@ presence_crash_probe: PASS
 
 **结论：通过当前范围验收。** Linux 双节点本地与跨节点路由、重复登录、离线单次入库、Nginx 分流、Presence 生命周期、Redis 停机及节点崩溃 TTL 均有真实通过输出。该结论不扩展为端到端可靠投递、自动重连、TLS 或生产发布批准。
 
+### Stage 3
+
+**结论：Windows 开发检查通过，Linux 验收待执行。** 已有平台无关 RPC 分帧实测、源码守卫和 Stage 1/2 Windows 回归；尚无权宣称 UserService、ZooKeeper 注册或真实 RPC 在 Linux 编译运行通过。执行步骤见 `docs/stage3-mprpc-user-service.md`。
+
 ### 完整 V1
 
-**结论：不通过发布验收。** 原因不是现有测试失败，而是 UserService RPC、Qt5、AIService、Docker Compose 等承诺范围尚未实现。
+**结论：不通过发布验收。** 原因不是现有测试失败，而是 UserService RPC 尚缺 Linux 验收，且 Qt5、AIService、Docker Compose 等承诺范围尚未实现。
 
-## 10. Stage 3 准入与保留回归
+## 10. Stage 3 Linux 验收与保留回归
 
-Stage 2 准入条件已经满足，可以开始 MPRPC + UserService 阶段。Stage 3 修改期间必须
-继续保留以下回归门槛：
+Stage 2 准入条件已经满足，Stage 3 源码已经进入目标机验收阶段。Linux 验证时必须
+继续保留以下回归门槛，并执行 Stage 3 文档中的真实 RPC 与故障探针：
 
 ```bash
 ctest --test-dir build/stage1-tests --output-on-failure
@@ -301,13 +316,14 @@ python3 tests/stage2/cluster_probe.py
 ```
 
 仍建议单独补充但不冒充已执行的安全证据：包含单引号、超长 UTF-8、畸形 JSON 的
-专项输入测试，以及旧账号密码升级后的最终 SQL 输出。Stage 3 还必须新增真实 RPC
-超时、UserService 不可用、ZooKeeper 不可用和 EventLoop 不阻塞测试。
+专项输入测试，以及旧账号密码升级后的最终 SQL 输出。Stage 3 的真实 RPC 超时、
+UserService 不可用、ZooKeeper 不可用和 EventLoop 不阻塞探针当前均为待执行。
 
 ## 11. 可追溯证据
 
 - [阶段 1 实现与 Linux 记录](stage1-implementation.md)
 - [阶段 2 架构、部署和测试步骤](stage2-cluster.md)
+- [阶段 3 MPRPC 与 UserService](stage3-mprpc-user-service.md)
 - [阶段 0 基线](phase0-baseline.md)
 - [并发、异步 RPC 与 Presence 规则](concurrency-presence-design.md)
 - [`tests/stage1/`](../tests/stage1/)

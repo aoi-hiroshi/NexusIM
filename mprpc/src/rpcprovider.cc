@@ -1,208 +1,388 @@
 #include "rpcprovider.h"
-#include "mprpcapplication.h"
-#include "rpcheader.pb.h"
+
 #include "logger.h"
+#include "mprpcapplication.h"
+#include "mprpccontroller.h"
+#include "rpc_envelope.pb.h"
 #include "zookeeperutil.h"
 
-/*
-service_name =>  service描述   
-                        =》 service* 记录服务对象
-                        method_name  =>  method方法对象
-json   protobuf
-*/
-// 这里是框架提供给外部使用的，可以发布rpc方法的函数接口
-void RpcProvider::NotifyService(google::protobuf::Service *service)
+#include <muduo/net/EventLoop.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+namespace
 {
-    ServiceInfo service_info;
 
-    // 获取了服务对象的描述信息
-    const google::protobuf::ServiceDescriptor *pserviceDesc = service->GetDescriptor();
-    // 获取服务的名字
-    std::string service_name = pserviceDesc->name();
-    // 获取服务对象service的方法的数量
-    int methodCnt = pserviceDesc->method_count();
-
-    // std::cout << "service_name:" << service_name << std::endl;
-    LOG_INFO("service_name:%s", service_name.c_str());
-
-    for (int i=0; i < methodCnt; ++i)
+std::size_t positiveSize(const std::string &value, std::size_t fallback)
+{
+    try
     {
-        // 获取了服务对象指定下标的服务方法的描述（抽象描述） UserService   Login
-        const google::protobuf::MethodDescriptor* pmethodDesc = pserviceDesc->method(i);
-        std::string method_name = pmethodDesc->name();
-        service_info.m_methodMap.insert({method_name, pmethodDesc});
-
-        LOG_INFO("method_name:%s", method_name.c_str());
+        const unsigned long long parsed = std::stoull(value);
+        return parsed == 0 ? fallback : static_cast<std::size_t>(parsed);
     }
-    service_info.m_service = service;
-    m_serviceMap.insert({service_name, service_info});
+    catch (...)
+    {
+        return fallback;
+    }
 }
 
-// 启动rpc服务节点，开始提供rpc远程网络调用服务
-void RpcProvider::Run()
+std::uint32_t positiveUint(const std::string &value, std::uint32_t fallback)
 {
-    // 读取配置文件rpcserver的信息
-    std::string ip = MprpcApplication::GetInstance().GetConfig().Load("rpcserverip");
-    uint16_t port = atoi(MprpcApplication::GetInstance().GetConfig().Load("rpcserverport").c_str());
-    muduo::net::InetAddress address(ip, port);
+    const std::size_t parsed = positiveSize(value, fallback);
+    return parsed > std::numeric_limits<std::uint32_t>::max()
+               ? fallback
+               : static_cast<std::uint32_t>(parsed);
+}
 
-    // 创建TcpServer对象
-    muduo::net::TcpServer server(&m_eventLoop, address, "RpcProvider");
+int positiveInt(const std::string &value, int fallback)
+{
+    return static_cast<int>(std::min<std::size_t>(
+        positiveSize(value, static_cast<std::size_t>(fallback)),
+        static_cast<std::size_t>(std::numeric_limits<int>::max())));
+}
 
-    // 绑定连接回调和消息读写回调方法  分离了网络代码和业务代码
-    server.setConnectionCallback(std::bind(&RpcProvider::OnConnection, this, std::placeholders::_1));
-    server.setMessageCallback(std::bind(&RpcProvider::OnMessage, this, std::placeholders::_1, 
-            std::placeholders::_2, std::placeholders::_3));
+bool deadlineExpired(std::int64_t deadlineUnixMs)
+{
+    if (deadlineUnixMs <= 0) return true;
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    return now >= deadlineUnixMs;
+}
 
-    // 设置muduo库的线程数量
-    server.setThreadNum(4);
+class RpcDoneClosure final : public google::protobuf::Closure
+{
+public:
+    explicit RpcDoneClosure(std::function<void()> callback)
+        : callback_(std::move(callback)) {}
 
-    // 把当前rpc节点上要发布的服务全部注册到zk上面，让rpc client可以从zk上发现服务
-    // session timeout   30s     zkclient 网络I/O线程  1/3 * timeout 时间发送ping消息
-    ZkClient zkCli;
-    zkCli.Start();
-    // service_name为永久性节点    method_name为临时性节点
-    for (auto &sp : m_serviceMap) 
+    void Run() override
     {
-        // /service_name   /UserServiceRpc
-        std::string service_path = "/" + sp.first;
-        zkCli.Create(service_path.c_str(), nullptr, 0);
-        for (auto &mp : sp.second.m_methodMap)
+        auto callback = std::move(callback_);
+        delete this;
+        if (callback) callback();
+    }
+
+private:
+    std::function<void()> callback_;
+};
+
+} // namespace
+
+struct RpcProvider::CallContext
+{
+    std::weak_ptr<muduo::net::TcpConnection> connection;
+    std::string requestId;
+    std::int64_t deadlineUnixMs{0};
+    std::unique_ptr<google::protobuf::Message> request;
+    std::unique_ptr<google::protobuf::Message> response;
+    MprpcController controller;
+};
+
+RpcProvider::RpcProvider()
+    : executor_(
+          "rpc-provider",
+          positiveSize(MprpcApplication::GetInstance().GetConfig().LoadOr(
+                           "providerthreads", "4"),
+                       4),
+          positiveSize(MprpcApplication::GetInstance().GetConfig().LoadOr(
+                           "providerqueue", "512"),
+                       512)),
+      codec_(positiveUint(MprpcApplication::GetInstance().GetConfig().LoadOr(
+                              "rpcmaxframe_bytes", "4194304"),
+                          mprpc::RpcFrameCodec::kDefaultMaxFrameLength))
+{
+}
+
+void RpcProvider::NotifyService(google::protobuf::Service *service)
+{
+    if (service == nullptr) throw std::invalid_argument("RPC service is null");
+    ServiceInfo serviceInfo;
+    const auto *descriptor = service->GetDescriptor();
+    const std::string serviceName = descriptor->full_name();
+    for (int index = 0; index < descriptor->method_count(); ++index)
+    {
+        const auto *method = descriptor->method(index);
+        serviceInfo.m_methodMap.emplace(method->name(), method);
+        LOG_INFO("rpc method registered: %s/%s", serviceName.c_str(),
+                 method->name().c_str());
+    }
+    serviceInfo.m_service = service;
+    m_serviceMap[serviceName] = std::move(serviceInfo);
+}
+
+bool RpcProvider::Run()
+{
+    auto &config = MprpcApplication::GetInstance().GetConfig();
+    const std::string ip = config.LoadOr("rpcserverip", "127.0.0.1");
+    const int portValue = positiveInt(config.LoadOr("rpcserverport", "8001"),
+                                      8001);
+    if (portValue <= 0 || portValue > 65535)
+    {
+        LOG_ERR("invalid RPC provider port");
+        return false;
+    }
+
+    muduo::net::InetAddress address(ip, static_cast<std::uint16_t>(portValue));
+    muduo::net::TcpServer server(&m_eventLoop, address, "NexusIM-RpcProvider");
+    server.setConnectionCallback(
+        std::bind(&RpcProvider::OnConnection, this, std::placeholders::_1));
+    server.setMessageCallback(
+        std::bind(&RpcProvider::OnMessage, this, std::placeholders::_1,
+                  std::placeholders::_2, std::placeholders::_3));
+    server.setThreadNum(positiveInt(
+        config.LoadOr("provideriothreads", "2"), 2));
+    server.start();
+
+    ZkClient zkClient;
+    std::string zkError;
+    const int connectTimeout = positiveInt(
+        config.LoadOr("zkconnecttimeout_ms", "2000"), 2000);
+    if (!zkClient.Start(std::chrono::milliseconds(connectTimeout), &zkError))
+    {
+        LOG_ERR("ZooKeeper registration failed: %s", zkError.c_str());
+        return false;
+    }
+
+    for (const auto &serviceEntry : m_serviceMap)
+    {
+        const std::string servicePath = "/" + serviceEntry.first;
+        if (!zkClient.Create(servicePath.c_str(), nullptr, 0, 0, &zkError))
         {
-            // /service_name/method_name   /UserServiceRpc/Login 存储当前这个rpc服务节点主机的ip和port
-            std::string method_path = service_path + "/" + mp.first;
-            char method_path_data[128] = {0};
-            sprintf(method_path_data, "%s:%d", ip.c_str(), port);
-            // ZOO_EPHEMERAL表示znode是一个临时性节点
-            zkCli.Create(method_path.c_str(), method_path_data, strlen(method_path_data), ZOO_EPHEMERAL);
+            LOG_ERR("service znode registration failed: %s", zkError.c_str());
+            return false;
+        }
+        for (const auto &methodEntry : serviceEntry.second.m_methodMap)
+        {
+            const std::string methodPath = servicePath + "/" + methodEntry.first;
+            const std::string endpoint = ip + ":" + std::to_string(portValue);
+            if (!zkClient.Create(methodPath.c_str(), endpoint.data(),
+                                 static_cast<int>(endpoint.size()),
+                                 ZOO_EPHEMERAL, &zkError))
+            {
+                LOG_ERR("method znode registration failed: %s", zkError.c_str());
+                return false;
+            }
         }
     }
 
-    // rpc服务端准备启动，打印信息
-    std::cout << "RpcProvider start service at ip:" << ip << " port:" << port << std::endl;
-
-    // 启动网络服务
-    server.start();
-    m_eventLoop.loop(); 
+    LOG_INFO("RpcProvider listening on %s:%d", ip.c_str(), portValue);
+    m_eventLoop.loop();
+    return true;
 }
 
-// 新的socket连接回调
-void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn)
+void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &connection)
 {
-    if (!conn->connected())
+    if (!connection->connected())
     {
-        // 和rpc client的连接断开了
-        conn->shutdown();
+        LOG_INFO("RPC connection closed: %s", connection->name().c_str());
     }
 }
 
-/*
-在框架内部，RpcProvider和RpcConsumer协商好之间通信用的protobuf数据类型
-service_name method_name args    定义proto的message类型，进行数据头的序列化和反序列化
-                                 service_name method_name args_size
-16UserServiceLoginzhang san123456   
-
-header_size(4个字节) + header_str + args_str
-10 "10"
-10000 "1000000"
-std::string   insert和copy方法 
-*/
-// 已建立连接用户的读写事件回调 如果远程有一个rpc服务的调用请求，那么OnMessage方法就会响应
-void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, 
-                            muduo::net::Buffer *buffer, 
-                            muduo::Timestamp)
+void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &connection,
+                            muduo::net::Buffer *buffer, muduo::Timestamp)
 {
-    // 网络上接收的远程rpc调用请求的字符流    Login args
-    std::string recv_buf = buffer->retrieveAllAsString();
-
-    // 从字符流中读取前4个字节的内容
-    uint32_t header_size = 0;
-    recv_buf.copy((char*)&header_size, 4, 0);
-
-    // 根据header_size读取数据头的原始字符流，反序列化数据，得到rpc请求的详细信息
-    std::string rpc_header_str = recv_buf.substr(4, header_size);
-    mprpc::RpcHeader rpcHeader;
-    std::string service_name;
-    std::string method_name;
-    uint32_t args_size;
-    if (rpcHeader.ParseFromString(rpc_header_str))
+    const auto result = codec_.decode(buffer, [this, connection](std::string frame) {
+        if (!executor_.trySubmit(
+                [this, connection, frame = std::move(frame)]() mutable {
+                    DispatchFrame(connection, std::move(frame));
+                }))
+        {
+            SendError(connection, "", mprpc::RPC_STATUS_SERVER_BUSY,
+                      "RPC provider queue is full", false);
+        }
+    });
+    if (result.status == mprpc::RpcFrameCodec::Status::InvalidLength)
     {
-        // 数据头反序列化成功
-        service_name = rpcHeader.service_name();
-        method_name = rpcHeader.method_name();
-        args_size = rpcHeader.args_size();
+        SendError(connection, "", mprpc::RPC_STATUS_INVALID_REQUEST,
+                  "invalid or oversized RPC frame", true);
     }
-    else
-    {
-        // 数据头反序列化失败
-        std::cout << "rpc_header_str:" << rpc_header_str << " parse error!" << std::endl;
-        return;
-    }
-
-    // 获取rpc方法参数的字符流数据
-    std::string args_str = recv_buf.substr(4 + header_size, args_size);
-
-    // 打印调试信息
-    std::cout << "============================================" << std::endl;
-    std::cout << "header_size: " << header_size << std::endl; 
-    std::cout << "rpc_header_str: " << rpc_header_str << std::endl; 
-    std::cout << "service_name: " << service_name << std::endl; 
-    std::cout << "method_name: " << method_name << std::endl; 
-    std::cout << "args_str: " << args_str << std::endl; 
-    std::cout << "============================================" << std::endl;
-
-    // 获取service对象和method对象
-    auto it = m_serviceMap.find(service_name);
-    if (it == m_serviceMap.end())
-    {
-        std::cout << service_name << " is not exist!" << std::endl;
-        return;
-    }
-
-    auto mit = it->second.m_methodMap.find(method_name);
-    if (mit == it->second.m_methodMap.end())
-    {
-        std::cout << service_name << ":" << method_name << " is not exist!" << std::endl;
-        return;
-    }
-
-    google::protobuf::Service *service = it->second.m_service; // 获取service对象  new UserService
-    const google::protobuf::MethodDescriptor *method = mit->second; // 获取method对象  Login
-
-    // 生成rpc方法调用的请求request和响应response参数
-    google::protobuf::Message *request = service->GetRequestPrototype(method).New();
-    if (!request->ParseFromString(args_str))
-    {
-        std::cout << "request parse error, content:" << args_str << std::endl;
-        return;
-    }
-    google::protobuf::Message *response = service->GetResponsePrototype(method).New();
-
-    // 给下面的method方法的调用，绑定一个Closure的回调函数
-    google::protobuf::Closure *done = google::protobuf::NewCallback<RpcProvider, 
-                                                                    const muduo::net::TcpConnectionPtr&, 
-                                                                    google::protobuf::Message*>
-                                                                    (this, 
-                                                                    &RpcProvider::SendRpcResponse, 
-                                                                    conn, response);
-
-    // 在框架上根据远端rpc请求，调用当前rpc节点上发布的方法
-    // new UserService().Login(controller, request, response, done)
-    service->CallMethod(method, nullptr, request, response, done);
 }
 
-// Closure的回调操作，用于序列化rpc的响应和网络发送
-void RpcProvider::SendRpcResponse(const muduo::net::TcpConnectionPtr& conn, google::protobuf::Message *response)
+void RpcProvider::DispatchFrame(const muduo::net::TcpConnectionPtr &connection,
+                                std::string frame)
 {
-    std::string response_str;
-    if (response->SerializeToString(&response_str)) // response进行序列化
+    mprpc::RpcEnvelope envelope;
+    if (!envelope.ParseFromString(frame) || envelope.protocol_version() != 1 ||
+        envelope.message_type() != mprpc::RPC_MESSAGE_TYPE_REQUEST ||
+        envelope.request_id().empty())
     {
-        // 序列化成功后，通过网络把rpc方法执行的结果发送会rpc的调用方
-        conn->send(response_str);
+        SendError(connection, envelope.request_id(),
+                  mprpc::RPC_STATUS_INVALID_REQUEST,
+                  "invalid RPC request envelope", false);
+        return;
     }
-    else
+    if (deadlineExpired(envelope.deadline_unix_ms()))
     {
-        std::cout << "serialize response_str error!" << std::endl; 
+        SendError(connection, envelope.request_id(),
+                  mprpc::RPC_STATUS_DEADLINE_EXCEEDED,
+                  "RPC request deadline exceeded", false);
+        return;
     }
-    conn->shutdown(); // 模拟http的短链接服务，由rpcprovider主动断开连接
+
+    const auto serviceIterator = m_serviceMap.find(envelope.service_name());
+    if (serviceIterator == m_serviceMap.end())
+    {
+        SendError(connection, envelope.request_id(),
+                  mprpc::RPC_STATUS_SERVICE_NOT_FOUND,
+                  "RPC service is not registered", false);
+        return;
+    }
+    const auto methodIterator =
+        serviceIterator->second.m_methodMap.find(envelope.method_name());
+    if (methodIterator == serviceIterator->second.m_methodMap.end())
+    {
+        SendError(connection, envelope.request_id(),
+                  mprpc::RPC_STATUS_METHOD_NOT_FOUND,
+                  "RPC method is not registered", false);
+        return;
+    }
+
+    auto context = std::make_shared<CallContext>();
+    context->connection = connection;
+    context->requestId = envelope.request_id();
+    context->deadlineUnixMs = envelope.deadline_unix_ms();
+    const auto remaining = std::chrono::milliseconds(
+        std::max<std::int64_t>(
+            0, envelope.deadline_unix_ms() -
+                   std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count()));
+    context->controller.SetDeadline(MprpcController::Clock::now() + remaining);
+    auto *service = serviceIterator->second.m_service;
+    const auto *method = methodIterator->second;
+    context->request.reset(service->GetRequestPrototype(method).New());
+    context->response.reset(service->GetResponsePrototype(method).New());
+    if (!context->request->ParseFromString(envelope.payload()))
+    {
+        SendError(connection, envelope.request_id(),
+                  mprpc::RPC_STATUS_PARSE_ERROR,
+                  "RPC request payload could not be parsed", false);
+        return;
+    }
+
+    auto *done = new RpcDoneClosure(
+        [this, context] { SendRpcResponse(context); });
+    try
+    {
+        service->CallMethod(method, &context->controller,
+                            context->request.get(), context->response.get(), done);
+    }
+    catch (const std::exception &error)
+    {
+        context->controller.SetFailed(mprpc::RpcErrorCode::InternalError,
+                                      error.what());
+        done->Run();
+    }
+    catch (...)
+    {
+        context->controller.SetFailed(mprpc::RpcErrorCode::InternalError,
+                                      "unhandled RPC service exception");
+        done->Run();
+    }
+}
+
+void RpcProvider::SendRpcResponse(const std::shared_ptr<CallContext> &context)
+{
+    const auto connection = context->connection.lock();
+    if (!connection || !connection->connected()) return;
+    if (deadlineExpired(context->deadlineUnixMs))
+    {
+        SendError(connection, context->requestId,
+                  mprpc::RPC_STATUS_DEADLINE_EXCEEDED,
+                  "RPC service completed after the deadline", false);
+        return;
+    }
+    if (context->controller.Failed())
+    {
+        SendError(connection, context->requestId,
+                  mprpc::RPC_STATUS_SERVICE_ERROR,
+                  context->controller.ErrorText(), false);
+        return;
+    }
+
+    std::string responsePayload;
+    if (!context->response->SerializeToString(&responsePayload))
+    {
+        SendError(connection, context->requestId,
+                  mprpc::RPC_STATUS_INTERNAL_ERROR,
+                  "RPC response serialization failed", false);
+        return;
+    }
+
+    mprpc::RpcEnvelope envelope;
+    envelope.set_protocol_version(1);
+    envelope.set_message_type(mprpc::RPC_MESSAGE_TYPE_RESPONSE);
+    envelope.set_request_id(context->requestId);
+    envelope.set_status_code(mprpc::RPC_STATUS_OK);
+    envelope.set_payload(std::move(responsePayload));
+    std::string payload;
+    if (!envelope.SerializeToString(&payload))
+    {
+        SendError(connection, context->requestId,
+                  mprpc::RPC_STATUS_INTERNAL_ERROR,
+                  "RPC envelope serialization failed", false);
+        return;
+    }
+
+    std::string frame;
+    try
+    {
+        frame = mprpc::RpcFrameCodec::encode(payload, codec_.maxFrameLength());
+    }
+    catch (const std::exception &error)
+    {
+        SendError(connection, context->requestId,
+                  mprpc::RPC_STATUS_INTERNAL_ERROR, error.what(), false);
+        return;
+    }
+    std::weak_ptr<muduo::net::TcpConnection> weakConnection(connection);
+    connection->getLoop()->queueInLoop(
+        [weakConnection, frame = std::move(frame)] {
+            const auto liveConnection = weakConnection.lock();
+            if (liveConnection && liveConnection->connected())
+                liveConnection->send(frame);
+        });
+}
+
+void RpcProvider::SendError(const muduo::net::TcpConnectionPtr &connection,
+                            const std::string &requestId, int statusCode,
+                            const std::string &message, bool closeAfter)
+{
+    if (!connection) return;
+    mprpc::RpcEnvelope envelope;
+    envelope.set_protocol_version(1);
+    envelope.set_message_type(mprpc::RPC_MESSAGE_TYPE_RESPONSE);
+    envelope.set_request_id(requestId);
+    envelope.set_status_code(static_cast<mprpc::RpcStatusCode>(statusCode));
+    envelope.set_error_message(message);
+    std::string payload;
+    if (!envelope.SerializeToString(&payload)) return;
+
+    std::string frame;
+    try
+    {
+        frame = mprpc::RpcFrameCodec::encode(payload, codec_.maxFrameLength());
+    }
+    catch (...)
+    {
+        closeAfter = true;
+    }
+    std::weak_ptr<muduo::net::TcpConnection> weakConnection(connection);
+    connection->getLoop()->queueInLoop(
+        [weakConnection, frame = std::move(frame), closeAfter] {
+            const auto liveConnection = weakConnection.lock();
+            if (!liveConnection || !liveConnection->connected()) return;
+            if (!frame.empty()) liveConnection->send(frame);
+            if (closeAfter) liveConnection->shutdown();
+        });
 }

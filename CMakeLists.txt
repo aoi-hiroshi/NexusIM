@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.10)
+project(NexusIM LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(NEXUSIM_BUILD_CHATSERVER "Build the Muduo ChatServer" ON)
+option(NEXUSIM_BUILD_USER_SERVICE "Build the MPRPC UserService" ON)
+option(NEXUSIM_BUILD_TESTS "Build portable and RPC tests" ON)
+
+find_package(Protobuf REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
+
+add_subdirectory(proto)
+add_subdirectory(mprpc)
+
+if(NEXUSIM_BUILD_CHATSERVER)
+    add_subdirectory(chatserver)
+endif()
+if(NEXUSIM_BUILD_USER_SERVICE)
+    add_subdirectory(services/user_service)
+endif()
+if(NEXUSIM_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests/stage3)
+endif()

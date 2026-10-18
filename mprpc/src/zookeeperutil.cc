@@ -1,101 +1,211 @@
 #include "zookeeperutil.h"
+
 #include "mprpcapplication.h"
-#include <semaphore.h>
-#include <iostream>
 
-// 全局的watcher观察器   zkserver给zkclient的通知
-void global_watcher(zhandle_t *zh, int type,
-                   int state, const char *path, void *watcherCtx)
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+namespace
 {
-    if (type == ZOO_SESSION_EVENT)  // 回调的消息类型是和会话相关的消息类型
-	{
-		if (state == ZOO_CONNECTED_STATE)  // zkclient和zkserver连接成功
-		{
-			sem_t *sem = (sem_t*)zoo_get_context(zh);
-            sem_post(sem);
-		}
-	}
+
+int positiveInt(const std::string &value, int fallback)
+{
+    try
+    {
+        const int parsed = std::stoi(value);
+        return parsed > 0 ? parsed : fallback;
+    }
+    catch (...)
+    {
+        return fallback;
+    }
 }
 
-ZkClient::ZkClient() : m_zhandle(nullptr)
+void globalWatcher(zhandle_t *, int type, int state, const char *, void *context)
 {
+    auto *client = static_cast<ZkClient *>(context);
+    if (client != nullptr) client->HandleWatcherEvent(type, state);
 }
+
+std::string zkError(int code)
+{
+    return std::string(zerror(code));
+}
+
+struct GetDataState
+{
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool done{false};
+    int result{ZSYSTEMERROR};
+    std::string value;
+};
+
+void getDataCompletion(int result, const char *value, int valueLength,
+                       const Stat *, const void *context)
+{
+    std::unique_ptr<std::shared_ptr<GetDataState>> holder(
+        static_cast<std::shared_ptr<GetDataState> *>(
+            const_cast<void *>(context)));
+    const auto state = *holder;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->result = result;
+        if (result == ZOK && value != nullptr && valueLength >= 0)
+            state->value.assign(value, static_cast<std::size_t>(valueLength));
+        state->done = true;
+    }
+    state->changed.notify_one();
+}
+
+} // namespace
+
+ZkClient::ZkClient() : m_zhandle(nullptr) {}
 
 ZkClient::~ZkClient()
 {
     if (m_zhandle != nullptr)
     {
-        zookeeper_close(m_zhandle); // 关闭句柄，释放资源  MySQL_Conn
+        zookeeper_close(m_zhandle);
+        m_zhandle = nullptr;
     }
 }
 
-// 连接zkserver
-void ZkClient::Start()
+bool ZkClient::Start(std::chrono::milliseconds timeout, std::string *error)
 {
-    std::string host = MprpcApplication::GetInstance().GetConfig().Load("zookeeperip");
-    std::string port = MprpcApplication::GetInstance().GetConfig().Load("zookeeperport");
-    std::string connstr = host + ":" + port;
-    
-	/*
-	zookeeper_mt：多线程版本
-	zookeeper的API客户端程序提供了三个线程
-	API调用线程 
-	网络I/O线程  pthread_create  poll
-	watcher回调线程 pthread_create
-	*/
-    m_zhandle = zookeeper_init(connstr.c_str(), global_watcher, 30000, nullptr, nullptr, 0);
-    if (nullptr == m_zhandle) 
+    const auto &config = MprpcApplication::GetInstance().GetConfig();
+    const std::string host = config.LoadOr("zookeeperip", "127.0.0.1");
+    const std::string port = config.LoadOr("zookeeperport", "2181");
+    const std::string connection = host + ":" + port;
+    const int configuredSession = positiveInt(
+        config.LoadOr("zksessiontimeout_ms", "3000"), 3000);
+    const int timeoutMs = static_cast<int>(
+        std::max<std::int64_t>(1, timeout.count()));
+    const int sessionTimeout =
+        std::max(1000, std::min(configuredSession, timeoutMs));
+
     {
-        std::cout << "zookeeper_init error!" << std::endl;
-        exit(EXIT_FAILURE);
+        std::lock_guard<std::mutex> lock(mutex_);
+        connected_ = false;
+    }
+    m_zhandle = zookeeper_init(connection.c_str(), globalWatcher,
+                               sessionTimeout, nullptr, this, 0);
+    if (m_zhandle == nullptr)
+    {
+        if (error != nullptr) *error = "zookeeper_init failed";
+        return false;
     }
 
-    sem_t sem;
-    sem_init(&sem, 0, 0);
-    zoo_set_context(m_zhandle, &sem);
-
-    sem_wait(&sem);
-    std::cout << "zookeeper_init success!" << std::endl;
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!stateChanged_.wait_for(lock, timeout, [this] { return connected_; }))
+    {
+        lock.unlock();
+        zookeeper_close(m_zhandle);
+        m_zhandle = nullptr;
+        if (error != nullptr) *error = "ZooKeeper connection timed out";
+        return false;
+    }
+    return true;
 }
 
-void ZkClient::Create(const char *path, const char *data, int datalen, int state)
+void ZkClient::HandleWatcherEvent(int type, int state)
 {
-    char path_buffer[128];
-    int bufferlen = sizeof(path_buffer);
-    int flag;
-	// 先判断path表示的znode节点是否存在，如果存在，就不再重复创建了
-	flag = zoo_exists(m_zhandle, path, 0, nullptr);
-	if (ZNONODE == flag) // 表示path的znode节点不存在
-	{
-		// 创建指定path的znode节点了
-		flag = zoo_create(m_zhandle, path, data, datalen,
-			&ZOO_OPEN_ACL_UNSAFE, state, path_buffer, bufferlen);
-		if (flag == ZOK)
-		{
-			std::cout << "znode create success... path:" << path << std::endl;
-		}
-		else
-		{
-			std::cout << "flag:" << flag << std::endl;
-			std::cout << "znode create error... path:" << path << std::endl;
-			exit(EXIT_FAILURE);
-		}
-	}
+    if (type != ZOO_SESSION_EVENT) return;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        connected_ = state == ZOO_CONNECTED_STATE;
+    }
+    stateChanged_.notify_all();
 }
 
-// 根据指定的path，获取znode节点的值
+bool ZkClient::Connected() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connected_;
+}
+
+bool ZkClient::Create(const char *path, const char *data, int datalen,
+                      int state, std::string *error)
+{
+    if (m_zhandle == nullptr || !Connected())
+    {
+        if (error != nullptr) *error = "ZooKeeper is not connected";
+        return false;
+    }
+
+    const int exists = zoo_exists(m_zhandle, path, 0, nullptr);
+    if (exists == ZOK)
+    {
+        if (state == 0) return true;
+        if (error != nullptr) *error = "ephemeral znode already exists";
+        return false;
+    }
+    if (exists != ZNONODE)
+    {
+        if (error != nullptr) *error = "exists failed: " + zkError(exists);
+        return false;
+    }
+
+    std::vector<char> createdPath(512, '\0');
+    const int result = zoo_create(
+        m_zhandle, path, data, datalen, &ZOO_OPEN_ACL_UNSAFE, state,
+        createdPath.data(), static_cast<int>(createdPath.size()));
+    if (result != ZOK)
+    {
+        if (error != nullptr) *error = "create failed: " + zkError(result);
+        return false;
+    }
+    return true;
+}
+
+bool ZkClient::GetData(const char *path, std::string &value,
+                       std::string *error)
+{
+    return GetData(path, value, std::chrono::milliseconds(3000), error);
+}
+
+bool ZkClient::GetData(const char *path, std::string &value,
+                       std::chrono::milliseconds timeout,
+                       std::string *error)
+{
+    value.clear();
+    if (m_zhandle == nullptr || !Connected())
+    {
+        if (error != nullptr) *error = "ZooKeeper is not connected";
+        return false;
+    }
+
+    auto state = std::make_shared<GetDataState>();
+    auto *holder = new std::shared_ptr<GetDataState>(state);
+    const int scheduled = zoo_aget(m_zhandle, path, 0, getDataCompletion,
+                                   holder);
+    if (scheduled != ZOK)
+    {
+        delete holder;
+        if (error != nullptr) *error = "get scheduling failed: " + zkError(scheduled);
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(state->mutex);
+    if (!state->changed.wait_for(lock, timeout, [&state] { return state->done; }))
+    {
+        if (error != nullptr) *error = "ZooKeeper query timed out";
+        return false;
+    }
+    if (state->result != ZOK)
+    {
+        if (error != nullptr) *error = "get failed: " + zkError(state->result);
+        return false;
+    }
+    value = state->value;
+    return true;
+}
+
 std::string ZkClient::GetData(const char *path)
 {
-    char buffer[64];
-	int bufferlen = sizeof(buffer);
-	int flag = zoo_get(m_zhandle, path, 0, buffer, &bufferlen, nullptr);
-	if (flag != ZOK)
-	{
-		std::cout << "get znode error... path:" << path << std::endl;
-		return "";
-	}
-	else
-	{
-		return buffer;
-	}
+    std::string value;
+    GetData(path, value, nullptr);
+    return value;
 }

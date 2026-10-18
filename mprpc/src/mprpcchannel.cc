@@ -1,158 +1,499 @@
 #include "mprpcchannel.h"
-#include <string>
-#include "rpcheader.pb.h"
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <unistd.h>
-#include <errno.h>
+
 #include "mprpcapplication.h"
 #include "mprpccontroller.h"
+#include "rpc_envelope.pb.h"
+#include "rpcframecodec.h"
 #include "zookeeperutil.h"
 
-/*
-header_size + service_name method_name args_size + args
-*/
-// 所有通过stub代理对象调用的rpc方法，都走到这里了，统一做rpc方法调用的数据数据序列化和网络发送 
-void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
-                                google::protobuf::RpcController* controller, 
-                                const google::protobuf::Message* request,
-                                google::protobuf::Message* response,
-                                google::protobuf:: Closure* done)
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <exception>
+#include <limits>
+#include <sstream>
+#include <string>
+
+namespace
 {
-    const google::protobuf::ServiceDescriptor* sd = method->service();
-    std::string service_name = sd->name(); // service_name
-    std::string method_name = method->name(); // method_name
 
-    // 获取参数的序列化字符串长度 args_size
-    uint32_t args_size = 0;
-    std::string args_str;
-    if (request->SerializeToString(&args_str))
+using Clock = MprpcController::Clock;
+
+class SocketHandle
+{
+public:
+    explicit SocketHandle(int value = -1) : value_(value) {}
+    ~SocketHandle()
     {
-        args_size = args_str.size();
+        if (value_ >= 0) ::close(value_);
     }
-    else
+    SocketHandle(const SocketHandle &) = delete;
+    SocketHandle &operator=(const SocketHandle &) = delete;
+    int get() const noexcept { return value_; }
+
+private:
+    int value_;
+};
+
+class DoneGuard
+{
+public:
+    explicit DoneGuard(google::protobuf::Closure *done) : done_(done) {}
+    ~DoneGuard()
     {
-        controller->SetFailed("serialize request error!");
+        if (done_ != nullptr) done_->Run();
+    }
+
+private:
+    google::protobuf::Closure *done_;
+};
+
+int positiveInt(const std::string &value, int fallback)
+{
+    try
+    {
+        const int parsed = std::stoi(value);
+        return parsed > 0 ? parsed : fallback;
+    }
+    catch (...)
+    {
+        return fallback;
+    }
+}
+
+std::uint32_t positiveUint(const std::string &value, std::uint32_t fallback)
+{
+    try
+    {
+        const unsigned long parsed = std::stoul(value);
+        if (parsed == 0 || parsed > std::numeric_limits<std::uint32_t>::max())
+            return fallback;
+        return static_cast<std::uint32_t>(parsed);
+    }
+    catch (...)
+    {
+        return fallback;
+    }
+}
+
+std::string nextRequestId()
+{
+    static std::atomic<std::uint64_t> sequence{1};
+    const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    return std::to_string(now) + "-" +
+           std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
+}
+
+int remainingMilliseconds(Clock::time_point deadline)
+{
+    const auto now = Clock::now();
+    if (now >= deadline) return 0;
+    const auto value = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           deadline - now)
+                           .count();
+    if (value <= 0) return 1;
+    return static_cast<int>(std::min<std::int64_t>(
+        value, std::numeric_limits<int>::max()));
+}
+
+void fail(google::protobuf::RpcController *controller,
+          mprpc::RpcErrorCode code, const std::string &message)
+{
+    if (auto *mprpcController = dynamic_cast<MprpcController *>(controller))
+    {
+        mprpcController->SetFailed(code, message);
+    }
+    else if (controller != nullptr)
+    {
+        controller->SetFailed(message);
+    }
+}
+
+bool cancelled(google::protobuf::RpcController *controller)
+{
+    return controller != nullptr && controller->IsCanceled();
+}
+
+bool waitForSocket(int fd, short events, Clock::time_point deadline,
+                   google::protobuf::RpcController *controller,
+                   mprpc::RpcErrorCode code, const char *operation)
+{
+    for (;;)
+    {
+        if (cancelled(controller))
+        {
+            fail(controller, mprpc::RpcErrorCode::Cancelled,
+                 std::string(operation) + " cancelled");
+            return false;
+        }
+        const int timeout = remainingMilliseconds(deadline);
+        if (timeout <= 0)
+        {
+            fail(controller, mprpc::RpcErrorCode::DeadlineExceeded,
+                 std::string(operation) + " deadline exceeded");
+            return false;
+        }
+        pollfd descriptor{fd, events, 0};
+        const int result = ::poll(&descriptor, 1, timeout);
+        if (result > 0)
+        {
+            if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+            {
+                fail(controller, code, std::string(operation) + " socket closed");
+                return false;
+            }
+            return true;
+        }
+        if (result == 0)
+        {
+            fail(controller, mprpc::RpcErrorCode::DeadlineExceeded,
+                 std::string(operation) + " deadline exceeded");
+            return false;
+        }
+        if (errno != EINTR)
+        {
+            fail(controller, code, std::string(operation) + " poll failed");
+            return false;
+        }
+    }
+}
+
+bool sendAll(int fd, const std::string &data, Clock::time_point deadline,
+             google::protobuf::RpcController *controller)
+{
+    std::size_t sent = 0;
+    while (sent < data.size())
+    {
+        if (!waitForSocket(fd, POLLOUT, deadline, controller,
+                           mprpc::RpcErrorCode::SendFailed, "RPC send"))
+            return false;
+#ifdef MSG_NOSIGNAL
+        const int flags = MSG_NOSIGNAL;
+#else
+        const int flags = 0;
+#endif
+        const ssize_t result = ::send(fd, data.data() + sent,
+                                      data.size() - sent, flags);
+        if (result > 0)
+        {
+            sent += static_cast<std::size_t>(result);
+            continue;
+        }
+        if (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+            continue;
+        fail(controller, mprpc::RpcErrorCode::SendFailed, "RPC send failed");
+        return false;
+    }
+    return true;
+}
+
+bool receiveExact(int fd, char *destination, std::size_t size,
+                  Clock::time_point deadline,
+                  google::protobuf::RpcController *controller)
+{
+    std::size_t received = 0;
+    while (received < size)
+    {
+        if (!waitForSocket(fd, POLLIN, deadline, controller,
+                           mprpc::RpcErrorCode::ReceiveFailed, "RPC receive"))
+            return false;
+        const ssize_t result = ::recv(fd, destination + received,
+                                      size - received, 0);
+        if (result > 0)
+        {
+            received += static_cast<std::size_t>(result);
+            continue;
+        }
+        if (result == 0)
+        {
+            fail(controller, mprpc::RpcErrorCode::ReceiveFailed,
+                 "RPC peer closed before returning a complete frame");
+            return false;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+        fail(controller, mprpc::RpcErrorCode::ReceiveFailed, "RPC receive failed");
+        return false;
+    }
+    return true;
+}
+
+bool parseAddress(const std::string &address, std::string &ip,
+                  std::uint16_t &port)
+{
+    const auto separator = address.rfind(':');
+    if (separator == std::string::npos || separator == 0 ||
+        separator + 1 >= address.size())
+        return false;
+    ip = address.substr(0, separator);
+    try
+    {
+        const unsigned long parsed = std::stoul(address.substr(separator + 1));
+        if (parsed == 0 || parsed > 65535) return false;
+        port = static_cast<std::uint16_t>(parsed);
+    }
+    catch (...)
+    {
+        return false;
+    }
+    return true;
+}
+
+mprpc::RpcErrorCode remoteError(mprpc::RpcStatusCode status)
+{
+    if (status == mprpc::RPC_STATUS_DEADLINE_EXCEEDED)
+        return mprpc::RpcErrorCode::DeadlineExceeded;
+    if (status == mprpc::RPC_STATUS_SERVER_BUSY)
+        return mprpc::RpcErrorCode::ServerBusy;
+    return mprpc::RpcErrorCode::RemoteError;
+}
+
+} // namespace
+
+void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
+                              google::protobuf::RpcController *controller,
+                              const google::protobuf::Message *request,
+                              google::protobuf::Message *response,
+                              google::protobuf::Closure *done)
+{
+    DoneGuard doneGuard(done);
+    MprpcController fallbackController;
+    if (controller == nullptr) controller = &fallbackController;
+
+    const auto &config = MprpcApplication::GetInstance().GetConfig();
+    auto *mprpcController = dynamic_cast<MprpcController *>(controller);
+    Clock::time_point deadline = mprpcController == nullptr
+                                     ? Clock::time_point::max()
+                                     : mprpcController->Deadline();
+    if (deadline == Clock::time_point::max())
+    {
+        deadline = Clock::now() + std::chrono::milliseconds(positiveInt(
+                                      config.LoadOr("rpcdeadline_ms", "2000"),
+                                      2000));
+        if (mprpcController != nullptr) mprpcController->SetDeadline(deadline);
+    }
+    if (remainingMilliseconds(deadline) <= 0)
+    {
+        fail(controller, mprpc::RpcErrorCode::DeadlineExceeded,
+             "RPC deadline already expired");
         return;
     }
-    
-    // 定义rpc的请求header
-    mprpc::RpcHeader rpcHeader;
-    rpcHeader.set_service_name(service_name);
-    rpcHeader.set_method_name(method_name);
-    rpcHeader.set_args_size(args_size);
 
-    uint32_t header_size = 0;
-    std::string rpc_header_str;
-    if (rpcHeader.SerializeToString(&rpc_header_str))
+    std::string requestPayload;
+    if (request == nullptr || !request->SerializeToString(&requestPayload))
     {
-        header_size = rpc_header_str.size();
-    }
-    else
-    {
-        controller->SetFailed("serialize rpc header error!");
+        fail(controller, mprpc::RpcErrorCode::ProtocolError,
+             "failed to serialize RPC request");
         return;
     }
 
-    // 组织待发送的rpc请求的字符串
-    std::string send_rpc_str;
-    send_rpc_str.insert(0, std::string((char*)&header_size, 4)); // header_size
-    send_rpc_str += rpc_header_str; // rpcheader
-    send_rpc_str += args_str; // args
+    const std::string serviceName = method->service()->full_name();
+    const std::string methodName = method->name();
+    const std::string requestId = nextRequestId();
 
-    // 打印调试信息
-    std::cout << "============================================" << std::endl;
-    std::cout << "header_size: " << header_size << std::endl; 
-    std::cout << "rpc_header_str: " << rpc_header_str << std::endl; 
-    std::cout << "service_name: " << service_name << std::endl; 
-    std::cout << "method_name: " << method_name << std::endl; 
-    std::cout << "args_str: " << args_str << std::endl; 
-    std::cout << "============================================" << std::endl;
-
-    // 使用tcp编程，完成rpc方法的远程调用
-    int clientfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (-1 == clientfd)
+    const int remainingForDiscovery = remainingMilliseconds(deadline);
+    const int configuredZkTimeout = positiveInt(
+        config.LoadOr("zkconnecttimeout_ms", "1000"), 1000);
+    ZkClient zkClient;
+    std::string discoveryError;
+    if (!zkClient.Start(std::chrono::milliseconds(
+                            std::min(remainingForDiscovery, configuredZkTimeout)),
+                        &discoveryError))
     {
-        char errtxt[512] = {0};
-        sprintf(errtxt, "create socket error! errno:%d", errno);
-        controller->SetFailed(errtxt);
+        fail(controller,
+             remainingMilliseconds(deadline) <= 0
+                 ? mprpc::RpcErrorCode::DeadlineExceeded
+                 : mprpc::RpcErrorCode::DiscoveryUnavailable,
+             discoveryError);
         return;
     }
 
-    // 读取配置文件rpcserver的信息
-    // std::string ip = MprpcApplication::GetInstance().GetConfig().Load("rpcserverip");
-    // uint16_t port = atoi(MprpcApplication::GetInstance().GetConfig().Load("rpcserverport").c_str());
-    // rpc调用方想调用service_name的method_name服务，需要查询zk上该服务所在的host信息
-    ZkClient zkCli;
-    zkCli.Start();
-    //  /UserServiceRpc/Login
-    std::string method_path = "/" + service_name + "/" + method_name;
-    // 127.0.0.1:8000
-    std::string host_data = zkCli.GetData(method_path.c_str());
-    if (host_data == "")
+    std::string address;
+    const std::string methodPath = "/" + serviceName + "/" + methodName;
+    const int remainingForQuery = remainingMilliseconds(deadline);
+    if (remainingForQuery <= 0 ||
+        !zkClient.GetData(methodPath.c_str(), address,
+                          std::chrono::milliseconds(remainingForQuery),
+                          &discoveryError))
     {
-        controller->SetFailed(method_path + " is not exist!");
+        fail(controller,
+             remainingMilliseconds(deadline) <= 0 ||
+                     discoveryError.find("timed out") != std::string::npos
+                 ? mprpc::RpcErrorCode::DeadlineExceeded
+                 : mprpc::RpcErrorCode::ServiceNotFound,
+             methodPath + " is unavailable: " + discoveryError);
         return;
     }
-    int idx = host_data.find(":");
-    if (idx == -1)
+    if (remainingMilliseconds(deadline) <= 0)
     {
-        controller->SetFailed(method_path + " address is invalid!");
-        return;
-    }
-    std::string ip = host_data.substr(0, idx);
-    uint16_t port = atoi(host_data.substr(idx+1, host_data.size()-idx).c_str()); 
-
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    server_addr.sin_addr.s_addr = inet_addr(ip.c_str());
-
-    // 连接rpc服务节点
-    if (-1 == connect(clientfd, (struct sockaddr*)&server_addr, sizeof(server_addr)))
-    {
-        close(clientfd);
-        char errtxt[512] = {0};
-        sprintf(errtxt, "connect error! errno:%d", errno);
-        controller->SetFailed(errtxt);
+        fail(controller, mprpc::RpcErrorCode::DeadlineExceeded,
+             "RPC deadline exceeded during service discovery");
         return;
     }
 
-    // 发送rpc请求
-    if (-1 == send(clientfd, send_rpc_str.c_str(), send_rpc_str.size(), 0))
+    std::string ip;
+    std::uint16_t port = 0;
+    if (!parseAddress(address, ip, port))
     {
-        close(clientfd);
-        char errtxt[512] = {0};
-        sprintf(errtxt, "send error! errno:%d", errno);
-        controller->SetFailed(errtxt);
+        fail(controller, mprpc::RpcErrorCode::InvalidAddress,
+             "invalid RPC endpoint: " + address);
         return;
     }
 
-    // 接收rpc请求的响应值
-    char recv_buf[1024] = {0};
-    int recv_size = 0;
-    if (-1 == (recv_size = recv(clientfd, recv_buf, 1024, 0)))
+    mprpc::RpcEnvelope envelope;
+    envelope.set_protocol_version(1);
+    envelope.set_message_type(mprpc::RPC_MESSAGE_TYPE_REQUEST);
+    envelope.set_request_id(requestId);
+    envelope.set_service_name(serviceName);
+    envelope.set_method_name(methodName);
+    envelope.set_payload(std::move(requestPayload));
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - Clock::now());
+    const auto wireDeadline = std::chrono::system_clock::now() +
+                              std::max(remaining, std::chrono::milliseconds(0));
+    envelope.set_deadline_unix_ms(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            wireDeadline.time_since_epoch())
+            .count());
+
+    std::string serializedEnvelope;
+    if (!envelope.SerializeToString(&serializedEnvelope))
     {
-        close(clientfd);
-        char errtxt[512] = {0};
-        sprintf(errtxt, "recv error! errno:%d", errno);
-        controller->SetFailed(errtxt);
+        fail(controller, mprpc::RpcErrorCode::ProtocolError,
+             "failed to serialize RPC envelope");
+        return;
+    }
+    const std::uint32_t maxFrameLength = positiveUint(
+        config.LoadOr("rpcmaxframe_bytes", "4194304"),
+        mprpc::RpcFrameCodec::kDefaultMaxFrameLength);
+    std::string outboundFrame;
+    try
+    {
+        outboundFrame = mprpc::RpcFrameCodec::encode(serializedEnvelope,
+                                                     maxFrameLength);
+    }
+    catch (const std::exception &error)
+    {
+        fail(controller, mprpc::RpcErrorCode::ProtocolError, error.what());
         return;
     }
 
-    // 反序列化rpc调用的响应数据
-    // std::string response_str(recv_buf, 0, recv_size); // bug出现问题，recv_buf中遇到\0后面的数据就存不下来了，导致反序列化失败
-    // if (!response->ParseFromString(response_str))
-    if (!response->ParseFromArray(recv_buf, recv_size))
+    SocketHandle socketHandle(::socket(AF_INET, SOCK_STREAM, 0));
+    if (socketHandle.get() < 0)
     {
-        close(clientfd);
-        char errtxt[512] = {0};
-        sprintf(errtxt, "parse error! response_str:%s", recv_buf);
-        controller->SetFailed(errtxt);
+        fail(controller, mprpc::RpcErrorCode::ConnectFailed,
+             "failed to create RPC socket");
+        return;
+    }
+    const int existingFlags = ::fcntl(socketHandle.get(), F_GETFL, 0);
+    if (existingFlags < 0 ||
+        ::fcntl(socketHandle.get(), F_SETFL, existingFlags | O_NONBLOCK) < 0)
+    {
+        fail(controller, mprpc::RpcErrorCode::ConnectFailed,
+             "failed to configure nonblocking RPC socket");
         return;
     }
 
-    close(clientfd);
+    sockaddr_in serverAddress{};
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(port);
+    if (::inet_pton(AF_INET, ip.c_str(), &serverAddress.sin_addr) != 1)
+    {
+        fail(controller, mprpc::RpcErrorCode::InvalidAddress,
+             "RPC endpoint must contain a valid IPv4 address");
+        return;
+    }
+
+    const int connectResult = ::connect(
+        socketHandle.get(), reinterpret_cast<sockaddr *>(&serverAddress),
+        sizeof(serverAddress));
+    if (connectResult < 0 && errno != EINPROGRESS)
+    {
+        fail(controller, mprpc::RpcErrorCode::ConnectFailed,
+             "RPC connect failed");
+        return;
+    }
+    if (connectResult < 0)
+    {
+        if (!waitForSocket(socketHandle.get(), POLLOUT, deadline, controller,
+                           mprpc::RpcErrorCode::ConnectFailed, "RPC connect"))
+            return;
+        int socketError = 0;
+        socklen_t socketErrorLength = sizeof(socketError);
+        if (::getsockopt(socketHandle.get(), SOL_SOCKET, SO_ERROR, &socketError,
+                         &socketErrorLength) < 0 || socketError != 0)
+        {
+            fail(controller, mprpc::RpcErrorCode::ConnectFailed,
+                 "RPC connect failed");
+            return;
+        }
+    }
+
+    if (!sendAll(socketHandle.get(), outboundFrame, deadline, controller)) return;
+
+    char header[mprpc::RpcFrameCodec::kHeaderLength]{};
+    if (!receiveExact(socketHandle.get(), header, sizeof(header), deadline,
+                      controller))
+        return;
+    const auto *bytes = reinterpret_cast<const unsigned char *>(header);
+    const std::uint32_t responseLength =
+        (static_cast<std::uint32_t>(bytes[0]) << 24U) |
+        (static_cast<std::uint32_t>(bytes[1]) << 16U) |
+        (static_cast<std::uint32_t>(bytes[2]) << 8U) |
+        static_cast<std::uint32_t>(bytes[3]);
+    if (responseLength == 0 || responseLength > maxFrameLength)
+    {
+        fail(controller, mprpc::RpcErrorCode::ProtocolError,
+             "invalid RPC response frame length");
+        return;
+    }
+    std::string responseFrame(responseLength, '\0');
+    if (!receiveExact(socketHandle.get(), responseFrame.data(),
+                      responseFrame.size(), deadline, controller))
+        return;
+
+    mprpc::RpcEnvelope responseEnvelope;
+    if (!responseEnvelope.ParseFromString(responseFrame) ||
+        responseEnvelope.protocol_version() != 1 ||
+        responseEnvelope.message_type() != mprpc::RPC_MESSAGE_TYPE_RESPONSE)
+    {
+        fail(controller, mprpc::RpcErrorCode::ProtocolError,
+             "invalid RPC response envelope");
+        return;
+    }
+    if (responseEnvelope.status_code() != mprpc::RPC_STATUS_OK)
+    {
+        if (!responseEnvelope.request_id().empty() &&
+            responseEnvelope.request_id() != requestId)
+        {
+            fail(controller, mprpc::RpcErrorCode::ProtocolError,
+                 "mismatched RPC error response");
+            return;
+        }
+        fail(controller, remoteError(responseEnvelope.status_code()),
+             responseEnvelope.error_message());
+        return;
+    }
+    if (responseEnvelope.request_id() != requestId)
+    {
+        fail(controller, mprpc::RpcErrorCode::ProtocolError,
+             "mismatched RPC success response");
+        return;
+    }
+    if (response == nullptr ||
+        !response->ParseFromString(responseEnvelope.payload()))
+    {
+        fail(controller, mprpc::RpcErrorCode::ProtocolError,
+             "failed to parse RPC response payload");
+    }
 }

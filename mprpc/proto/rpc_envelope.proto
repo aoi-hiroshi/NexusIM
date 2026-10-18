@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package mprpc;
+
+enum RpcMessageType {
+  RPC_MESSAGE_TYPE_UNSPECIFIED = 0;
+  RPC_MESSAGE_TYPE_REQUEST = 1;
+  RPC_MESSAGE_TYPE_RESPONSE = 2;
+}
+
+enum RpcStatusCode {
+  RPC_STATUS_OK = 0;
+  RPC_STATUS_INVALID_REQUEST = 1;
+  RPC_STATUS_SERVICE_NOT_FOUND = 2;
+  RPC_STATUS_METHOD_NOT_FOUND = 3;
+  RPC_STATUS_PARSE_ERROR = 4;
+  RPC_STATUS_SERVER_BUSY = 5;
+  RPC_STATUS_DEADLINE_EXCEEDED = 6;
+  RPC_STATUS_SERVICE_ERROR = 7;
+  RPC_STATUS_INTERNAL_ERROR = 8;
+}
+
+// Every RPC request and response is serialized as one envelope and then framed
+// with RpcFrameCodec's four-byte network-byte-order length prefix.
+message RpcEnvelope {
+  uint32 protocol_version = 1;
+  RpcMessageType message_type = 2;
+  string request_id = 3;
+  string service_name = 4;
+  string method_name = 5;
+  bytes payload = 6;
+  RpcStatusCode status_code = 7;
+  string error_message = 8;
+  int64 deadline_unix_ms = 9;
+}

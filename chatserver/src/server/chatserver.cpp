@@ -51,6 +51,7 @@ void ChatServer::onConnection(const muduo::net::TcpConnectionPtr &connection)
              << connection->name() << " disconnected";
     if (session)
     {
+        service_->cancelPendingRequests(*session);
         pendingRequests_.cancelConnection(session->connectionId, session->sessionId);
         if (session->authenticated &&
             !presenceExecutor_.trySubmit([service = service_, session = *session] {

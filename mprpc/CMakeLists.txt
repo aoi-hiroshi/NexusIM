@@ -1,22 +1,63 @@
-# 设置cmake的最低版本和项目名称
-cmake_minimum_required(VERSION 3.0)
-project(mprpc)
+cmake_minimum_required(VERSION 3.10)
 
-# 生成debug版本，可以进行gdb调试
-set(CMAKE_BUILD_TYPE "Debug")
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    project(NexusIMMprpc LANGUAGES CXX)
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+    find_package(Protobuf REQUIRED)
+    find_package(Threads REQUIRED)
+endif()
 
-# 设置项目可执行文件输出的路径
-set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
-# 设置项目库文件输出的路径
-set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)
+find_path(MUDUO_INCLUDE_DIR muduo/net/TcpServer.h)
+find_library(MUDUO_NET_LIBRARY NAMES muduo_net)
+find_library(MUDUO_BASE_LIBRARY NAMES muduo_base)
+find_path(ZOOKEEPER_INCLUDE_DIR zookeeper/zookeeper.h)
+find_library(ZOOKEEPER_LIBRARY NAMES zookeeper_mt)
+if(NOT MUDUO_INCLUDE_DIR OR NOT MUDUO_NET_LIBRARY OR NOT MUDUO_BASE_LIBRARY)
+    message(FATAL_ERROR "Muduo headers and muduo_net/muduo_base libraries are required")
+endif()
+if(NOT ZOOKEEPER_INCLUDE_DIR OR NOT ZOOKEEPER_LIBRARY)
+    message(FATAL_ERROR "ZooKeeper C client headers and zookeeper_mt are required")
+endif()
 
-# 设置项目编译头文件搜索路径 -I
-include_directories(${PROJECT_SOURCE_DIR}/src/include)
-include_directories(${PROJECT_SOURCE_DIR}/example)
-# 设置项目库文件搜索路径 -L
-link_directories(${PROJECT_SOURCE_DIR}/lib)
+protobuf_generate_cpp(MPRPC_ENVELOPE_SRCS MPRPC_ENVELOPE_HDRS
+                      ${CMAKE_CURRENT_SOURCE_DIR}/proto/rpc_envelope.proto)
 
-# src包含了mprpc框架所有的相关代码
-add_subdirectory(src)
-# example包含了mprpc框架使用的示例代码
-add_subdirectory(example)
+add_library(mprpc
+    src/boundedexecutor.cc
+    src/logger.cc
+    src/mprpcapplication.cc
+    src/mprpcchannel.cc
+    src/mprpcconfig.cc
+    src/mprpccontroller.cc
+    src/rpcprovider.cc
+    src/zookeeperutil.cc
+    ${MPRPC_ENVELOPE_SRCS}
+    ${MPRPC_ENVELOPE_HDRS})
+
+target_include_directories(mprpc
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/include
+        ${CMAKE_CURRENT_BINARY_DIR}
+    PUBLIC
+        ${MUDUO_INCLUDE_DIR}
+        ${ZOOKEEPER_INCLUDE_DIR})
+
+if(TARGET protobuf::libprotobuf)
+    target_link_libraries(mprpc PUBLIC protobuf::libprotobuf)
+else()
+    target_include_directories(mprpc PUBLIC ${Protobuf_INCLUDE_DIRS})
+    target_link_libraries(mprpc PUBLIC ${Protobuf_LIBRARIES})
+endif()
+target_link_libraries(mprpc PUBLIC
+    ${MUDUO_NET_LIBRARY}
+    ${MUDUO_BASE_LIBRARY}
+    ${ZOOKEEPER_LIBRARY}
+    Threads::Threads)
+
+option(NEXUSIM_BUILD_MPRPC_COURSE_EXAMPLES
+       "Build the unmodified course examples" OFF)
+if(NEXUSIM_BUILD_MPRPC_COURSE_EXAMPLES)
+    add_subdirectory(example)
+endif()

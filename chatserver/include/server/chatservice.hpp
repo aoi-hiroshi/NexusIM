@@ -3,16 +3,20 @@
 
 #include "json.hpp"
 #include "server/concurrency/boundedexecutor.hpp"
+#include "server/concurrency/pendingrequest.hpp"
 #include "server/model/friendmodel.hpp"
 #include "server/model/offlinemessagemodel.hpp"
-#include "server/model/usermodel.hpp"
 #include "server/redis/redis.hpp"
+#include "server/rpc/userserviceclient.hpp"
 #include "server/sessioncontext.hpp"
 
 #include <muduo/base/Timestamp.h>
 #include <muduo/net/TcpConnection.h>
 
 #include <functional>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -32,6 +36,7 @@ public:
     std::optional<nexusim::SessionContext> detachConnection(
         const muduo::net::TcpConnectionPtr &connection);
     void cleanupSession(const nexusim::SessionContext &session);
+    void cancelPendingRequests(const nexusim::SessionContext &session);
     std::optional<nexusim::SessionContext> sessionFor(
         const muduo::net::TcpConnectionPtr &connection) const;
     bool isCurrentSession(const nexusim::SessionContext &session) const;
@@ -48,6 +53,17 @@ private:
     void loginout(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
     bool bindAuthenticated(const muduo::net::TcpConnectionPtr &, int userId,
                            const std::string &userName, const std::string &sessionId);
+    bool bindAuthenticatedOnLoop(const muduo::net::TcpConnectionPtr &, int userId,
+                                 const std::string &userName,
+                                 const std::string &sessionId,
+                                 nexusim::PendingRequestRegistry::Clock::time_point deadline);
+    bool isCurrentLifecycle(const nexusim::SessionContext &session) const;
+    std::string beginRpcRequest(const nexusim::SessionContext &session,
+                                nexusim::PendingRequestRegistry::Clock::time_point deadline);
+    bool completeRpcRequest(const std::string &requestId,
+                            const nexusim::SessionContext &session,
+                            bool allowExpired = false);
+    std::chrono::milliseconds rpcTimeout() const;
     muduo::net::TcpConnectionPtr localConnectionForUser(
         int userId, const std::string *expectedSessionId = nullptr) const;
     void enqueueRedisDelivery(nexusim::ClusterDelivery delivery);
@@ -66,9 +82,11 @@ private:
     std::unordered_map<std::string, nexusim::SessionContext> sessions_;
     mutable std::mutex connectionMutex_;
 
-    UserModel userModel_;
     OfflineMsgModel offlineMessageModel_;
     FriendModel friendModel_;
+    nexusim::UserServiceClient userServiceClient_;
+    nexusim::PendingRequestRegistry rpcRequests_;
+    std::atomic<std::uint64_t> nextRpcRequestId_{1};
     std::string nodeId_;
     int presenceTtlSeconds_;
     nexusim::BoundedExecutor redisInboundExecutor_;

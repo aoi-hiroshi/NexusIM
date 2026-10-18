@@ -1,4 +1,5 @@
 #include "mprpcapplication.h"
+#include <cstdlib>
 #include <iostream>
 #include <unistd.h>
 #include <string>
@@ -12,14 +13,10 @@ void ShowArgsHelp()
 
 void MprpcApplication::Init(int argc, char **argv)
 {
-    if (argc < 2)
-    {
-        ShowArgsHelp();
-        exit(EXIT_FAILURE);
-    }
-
     int c = 0;
     std::string config_file;
+    optind = 1;
+    opterr = 0;
     while((c = getopt(argc, argv, "i:")) != -1)
     {
         switch (c)
@@ -29,17 +26,21 @@ void MprpcApplication::Init(int argc, char **argv)
             break;
         case '?':
             ShowArgsHelp();
-            exit(EXIT_FAILURE);
+            return;
         case ':':
             ShowArgsHelp();
-            exit(EXIT_FAILURE);
+            return;
         default:
             break;
         }
     }
 
-    // 开始加载配置文件了 rpcserver_ip=  rpcserver_port   zookeeper_ip=  zookepper_port=
-    m_config.LoadConfigFile(config_file.c_str());
+    if (config_file.empty())
+    {
+        const char *environmentFile = std::getenv("MPRPC_CONFIG_FILE");
+        if (environmentFile != nullptr) config_file = environmentFile;
+    }
+    if (!config_file.empty()) m_config.LoadConfigFile(config_file.c_str());
 
     // std::cout << "rpcserverip:" << m_config.Load("rpcserverip") << std::endl;
     // std::cout << "rpcserverport:" << m_config.Load("rpcserverport") << std::endl;

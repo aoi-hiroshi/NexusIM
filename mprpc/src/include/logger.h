@@ -1,5 +1,6 @@
 #pragma once
 #include "lockqueue.h"
+#include <atomic>
 #include <string>
 
 // 定义宏 LOG_INFO("xxx %d %s", 20, "xxxx")
@@ -41,7 +42,7 @@ public:
     // 写日志
     void Log(std::string msg);
 private:
-    int m_loglevel; // 记录日志级别
+    std::atomic<int> m_loglevel{INFO}; // 记录日志级别
     LockQueue<std::string>  m_lckQue; // 日志缓冲队列
 
     Logger();

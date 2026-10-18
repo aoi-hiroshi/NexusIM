@@ -1,16 +1,35 @@
 #include "mprpcconfig.h"
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
+#include <unordered_map>
+
+namespace
+{
+const std::unordered_map<std::string, std::string> kEnvironmentNames{
+    {"rpcserverip", "MPRPC_RPC_SERVER_IP"},
+    {"rpcserverport", "MPRPC_RPC_SERVER_PORT"},
+    {"zookeeperip", "MPRPC_ZOOKEEPER_IP"},
+    {"zookeeperport", "MPRPC_ZOOKEEPER_PORT"},
+    {"rpcdeadline_ms", "MPRPC_DEADLINE_MS"},
+    {"zkconnecttimeout_ms", "MPRPC_ZK_CONNECT_TIMEOUT_MS"},
+    {"zksessiontimeout_ms", "MPRPC_ZK_SESSION_TIMEOUT_MS"},
+    {"rpcmaxframe_bytes", "MPRPC_MAX_FRAME_BYTES"},
+    {"providerthreads", "MPRPC_PROVIDER_THREADS"},
+    {"providerqueue", "MPRPC_PROVIDER_QUEUE"},
+    {"provideriothreads", "MPRPC_PROVIDER_IO_THREADS"},
+};
+}
 
 // 负责解析加载配置文件
-void MprpcConfig::LoadConfigFile(const char *config_file)
+bool MprpcConfig::LoadConfigFile(const char *config_file)
 {
     FILE *pf = fopen(config_file, "r");
     if (nullptr == pf)
     {
-        std::cout << config_file << " is note exist!" << std::endl;
-        exit(EXIT_FAILURE);
+        std::cerr << config_file << " does not exist" << std::endl;
+        return false;
     }
 
     // 1.注释   2.正确的配置项 =    3.去掉开头的多余的空格 
@@ -24,7 +43,7 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
         Trim(read_buf);
 
         // 判断#的注释
-        if (read_buf[0] == '#' || read_buf.empty())
+        if (read_buf.empty() || read_buf[0] == '#')
         {
             continue;
         }
@@ -49,17 +68,28 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
     }
 
     fclose(pf);
+    return true;
 }
 
 // 查询配置项信息
-std::string MprpcConfig::Load(const std::string &key)
+std::string MprpcConfig::Load(const std::string &key) const
 {
     auto it = m_configMap.find(key);
-    if (it == m_configMap.end())
+    if (it != m_configMap.end())
     {
-        return "";
+        return it->second;
     }
-    return it->second;
+    const auto environmentName = kEnvironmentNames.find(key);
+    if (environmentName == kEnvironmentNames.end()) return "";
+    const char *value = std::getenv(environmentName->second.c_str());
+    return value == nullptr ? std::string() : std::string(value);
+}
+
+std::string MprpcConfig::LoadOr(const std::string &key,
+                                const std::string &fallback) const
+{
+    const std::string value = Load(key);
+    return value.empty() ? fallback : value;
 }
 
 // 去掉字符串前后的空格

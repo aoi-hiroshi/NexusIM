@@ -3,6 +3,13 @@
 
 #include "user.hpp"
 
+enum class UserQueryStatus
+{
+    Found,
+    NotFound,
+    Error
+};
+
 // User表的数据操作类
 class UserModel {
 public:
@@ -11,6 +18,7 @@ public:
 
     // 根据用户号码查询用户信息
     User query(int id);
+    UserQueryStatus queryById(int id, User &user);
 
     // Distinguishes a missing user from a database/query failure.
     bool exists(int id, bool &querySucceeded);
