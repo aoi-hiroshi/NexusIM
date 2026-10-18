@@ -15,7 +15,8 @@ std::string environmentOr(const char *name, const char *fallback)
     return value == nullptr || *value == '\0' ? std::string(fallback) : std::string(value);
 }
 
-redisContext *connectContext(const std::string &host, int port)
+redisContext *connectContext(const std::string &host, int port,
+                             bool commandTimeoutEnabled)
 {
     timeval timeout{};
     timeout.tv_sec = 3;
@@ -25,7 +26,12 @@ redisContext *connectContext(const std::string &host, int port)
         redisFree(context);
         return nullptr;
     }
-    if (context != nullptr) redisSetTimeout(context, timeout);
+    // A Pub/Sub connection is expected to block indefinitely while its channel
+    // is idle. SO_RCVTIMEO is therefore only valid for command connections.
+    if (context != nullptr && commandTimeoutEnabled)
+    {
+        redisSetTimeout(context, timeout);
+    }
     return context;
 }
 
@@ -104,9 +110,9 @@ bool Redis::connect(const std::string &nodeId)
         return false;
     }
 
-    publishContext_ = connectContext(host, port);
-    subscribeContext_ = connectContext(host, port);
-    presenceContext_ = connectContext(host, port);
+    publishContext_ = connectContext(host, port, true);
+    subscribeContext_ = connectContext(host, port, false);
+    presenceContext_ = connectContext(host, port, true);
     if (publishContext_ == nullptr || subscribeContext_ == nullptr || presenceContext_ == nullptr)
     {
         LOG_ERROR << "node=" << nodeId << " failed to connect all Redis contexts";

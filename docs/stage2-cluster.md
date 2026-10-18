@@ -30,6 +30,8 @@ CLI client --4-byte BE frame--> Nginx stream :8000
 - Publish 连接：同步 `PUBLISH`；有独立 mutex，不与 Presence 互相阻塞。
 - Subscribe 连接：只订阅 `nexusim:chat:node:<node_id>`。订阅线程只解析
   `ClusterDelivery` 并投递到 `redis-inbound` 有界执行器，不读取或修改连接表。
+  订阅 socket 不设置普通命令的 3 秒读超时，因为频道空闲时阻塞等待是正常状态；
+  析构时通过关闭 socket 唤醒线程。
 
 单线程 `redis-inbound` worker 按订阅连接的到达顺序处理 envelope，重新检查
 `recipient_id + expected_session_id` 是否仍是本节点当前会话。它不执行数据库、
@@ -193,11 +195,27 @@ nginx -V 2>&1 | grep -- --with-stream
 stream 模块包，并按 `nginx -V`/包文档在主配置顶层加载
 `ngx_stream_module.so`；不要盲写固定模块路径。
 
+Ubuntu/Debian 显示 `--with-stream=dynamic` 时，独立配置不会自动读取系统主配置中
+的 module include。应从已安装包取得真实路径并生成运行配置：
+
+```bash
+STREAM_SO="$(dpkg -L libnginx-mod-stream | grep '/ngx_stream_module\.so$' | head -n 1)"
+test -n "$STREAM_SO"
+{
+  printf 'load_module %s;\n' "$STREAM_SO"
+  cat deploy/nginx/nginx.conf
+} > /tmp/nexusim-nginx.conf
+NGINX_CONFIG=/tmp/nexusim-nginx.conf
+```
+
+静态 stream 构建则使用 `NGINX_CONFIG="$PWD/deploy/nginx/nginx.conf"`。单纯把仓库
+配置复制到 `/tmp` 并不会加载动态模块，会得到 `unknown directive "stream"`。
+
 验证并启动独立配置：
 
 ```bash
-sudo nginx -t -c "$PWD/deploy/nginx/nginx.conf"
-sudo nginx -c "$PWD/deploy/nginx/nginx.conf"
+sudo nginx -t -c "$NGINX_CONFIG"
+sudo nginx -c "$NGINX_CONFIG"
 ss -ltnp | grep ':8000'
 sudo tail -F /var/log/nginx/nexusim-stream-access.log /var/log/nginx/nexusim-error.log
 ```
@@ -205,8 +223,8 @@ sudo tail -F /var/log/nginx/nexusim-stream-access.log /var/log/nginx/nexusim-err
 重载/停止时继续传同一个绝对配置路径：
 
 ```bash
-sudo nginx -s reload -c "$PWD/deploy/nginx/nginx.conf"
-sudo nginx -s quit -c "$PWD/deploy/nginx/nginx.conf"
+sudo nginx -s reload -c "$NGINX_CONFIG"
+sudo nginx -s quit -c "$NGINX_CONFIG"
 ```
 
 ## 9. 测试

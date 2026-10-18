@@ -18,6 +18,12 @@ def function_body(source: str, signature: str, next_signature: str) -> str:
 redis_source = REDIS_SOURCE.read_text(encoding="utf-8")
 service_source = SERVICE_SOURCE.read_text(encoding="utf-8")
 
+if "subscribeContext_ = connectContext(host, port, false)" not in redis_source:
+    raise AssertionError("Pub/Sub connection must not time out while the channel is idle")
+if "publishContext_ = connectContext(host, port, true)" not in redis_source or \
+        "presenceContext_ = connectContext(host, port, true)" not in redis_source:
+    raise AssertionError("synchronous Redis command connections require bounded timeouts")
+
 observer = function_body(
     redis_source,
     "void Redis::observerChannelMessages()",
