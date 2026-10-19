@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -62,10 +63,9 @@ bool deadlineExpired(std::int64_t deadlineUnixMs)
 
 bool createEphemeralWithRetry(ZkClient &client, const std::string &path,
                               const std::string &data,
-                              std::chrono::milliseconds timeout,
+                              std::chrono::steady_clock::time_point deadline,
                               std::string &error)
 {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
     bool waitingLogged = false;
     for (;;)
     {
@@ -80,6 +80,8 @@ bool createEphemeralWithRetry(ZkClient &client, const std::string &path,
         if (!waitingLogged)
         {
             LOG_INFO("waiting for stale ephemeral znode: %s", path.c_str());
+            std::cerr << "waiting for stale ephemeral znode: " << path
+                      << std::endl;
             waitingLogged = true;
         }
         if (std::chrono::steady_clock::now() >= deadline)
@@ -179,12 +181,22 @@ bool RpcProvider::Run()
         config.LoadOr("zkconnecttimeout_ms", "2000"), 2000);
     const int sessionTimeout = positiveInt(
         config.LoadOr("zksessiontimeout_ms", "3000"), 3000);
+    const int registrationTimeout = positiveInt(
+        config.LoadOr("zkregistrationtimeout_ms", "15000"), 15000);
     if (!zkClient.Start(std::chrono::milliseconds(connectTimeout), &zkError))
     {
         LOG_ERR("ZooKeeper registration failed: %s", zkError.c_str());
         return false;
     }
 
+    // Use one deadline for the whole registration pass. A stale ephemeral
+    // node may outlive the previous process until ZooKeeper expires its
+    // session, but startup must still remain bounded.
+    const auto registrationDeadline = std::chrono::steady_clock::now() +
+                                      std::chrono::milliseconds(
+                                          std::max(registrationTimeout,
+                                                   sessionTimeout +
+                                                       connectTimeout));
     for (const auto &serviceEntry : m_serviceMap)
     {
         const std::string servicePath = "/" + serviceEntry.first;
@@ -197,12 +209,12 @@ bool RpcProvider::Run()
         {
             const std::string methodPath = servicePath + "/" + methodEntry.first;
             const std::string endpoint = ip + ":" + std::to_string(portValue);
-            const auto restartWait = std::chrono::milliseconds(
-                std::max(5000, sessionTimeout + connectTimeout));
             if (!createEphemeralWithRetry(zkClient, methodPath, endpoint,
-                                          restartWait, zkError))
+                                          registrationDeadline, zkError))
             {
                 LOG_ERR("method znode registration failed: %s", zkError.c_str());
+                std::cerr << "method znode registration failed for "
+                          << methodPath << ": " << zkError << std::endl;
                 return false;
             }
         }

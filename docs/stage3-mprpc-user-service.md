@@ -140,11 +140,15 @@ UserService 使用 `deploy/config/user-service.env.example`。数据库仍使用
 Schema 和大小写敏感表 `User`，没有创建第二套用户表。测试延迟变量默认禁用：
 
 ```text
+MPRPC_ZK_REGISTRATION_TIMEOUT_MS=15000
 USER_SERVICE_TEST_DELAY_USER_ID=-1
 USER_SERVICE_TEST_DELAY_MS=0
 ```
 
-它们只用于慢 RPC 验收，不应在正常运行中启用。
+`MPRPC_ZK_REGISTRATION_TIMEOUT_MS` 是 UserService 快速重启时等待旧临时方法节点
+过期的总上限；三个方法共享同一个截止时间，不会逐方法叠加。测试延迟变量只用于慢
+RPC 验收，不应在正常运行中启用。停止脚本会确认旧进程确实退出；若 SIGTERM 后仍存活，
+脚本保留 PID 文件并返回失败，不会错误宣称已停止。
 
 ## 8. Ubuntu 依赖检查与构建
 

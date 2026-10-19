@@ -15,6 +15,7 @@ const std::unordered_map<std::string, std::string> kEnvironmentNames{
     {"rpcdeadline_ms", "MPRPC_DEADLINE_MS"},
     {"zkconnecttimeout_ms", "MPRPC_ZK_CONNECT_TIMEOUT_MS"},
     {"zksessiontimeout_ms", "MPRPC_ZK_SESSION_TIMEOUT_MS"},
+    {"zkregistrationtimeout_ms", "MPRPC_ZK_REGISTRATION_TIMEOUT_MS"},
     {"rpcmaxframe_bytes", "MPRPC_MAX_FRAME_BYTES"},
     {"providerthreads", "MPRPC_PROVIDER_THREADS"},
     {"providerqueue", "MPRPC_PROVIDER_QUEUE"},

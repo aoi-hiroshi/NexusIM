@@ -50,11 +50,32 @@ fi
 new_pid="$(<"${pid_file}")"
 rpc_ip="$(set -a; source "${env_file}"; set +a; printf '%s' "${MPRPC_RPC_SERVER_IP}")"
 rpc_port="$(set -a; source "${env_file}"; set +a; printf '%s' "${MPRPC_RPC_SERVER_PORT}")"
+zk_connect_timeout_ms="$(set -a; source "${env_file}"; set +a; printf '%s' "${MPRPC_ZK_CONNECT_TIMEOUT_MS:-2000}")"
+zk_session_timeout_ms="$(set -a; source "${env_file}"; set +a; printf '%s' "${MPRPC_ZK_SESSION_TIMEOUT_MS:-3000}")"
+zk_registration_timeout_ms="$(set -a; source "${env_file}"; set +a; printf '%s' "${MPRPC_ZK_REGISTRATION_TIMEOUT_MS:-15000}")"
+if [[ ! "${zk_connect_timeout_ms}" =~ ^[0-9]+$ ]] ||
+   [[ ! "${zk_session_timeout_ms}" =~ ^[0-9]+$ ]] ||
+   [[ ! "${zk_registration_timeout_ms}" =~ ^[0-9]+$ ]] ||
+   ((zk_connect_timeout_ms <= 0 || zk_session_timeout_ms <= 0 ||
+      zk_registration_timeout_ms <= 0)); then
+    kill "${new_pid}" 2>/dev/null || true
+    rm -f -- "${pid_file}"
+    echo "UserService ZooKeeper timeout values must be positive integers" >&2
+    exit 2
+fi
 probe_host="${rpc_ip}"
 if [[ "${probe_host}" == "0.0.0.0" ]]; then probe_host="127.0.0.1"; fi
 
+# Leave enough time for connection establishment, bounded stale-znode expiry,
+# and a small scheduling margin. Each probe sleeps for 100 ms.
+effective_registration_timeout_ms="${zk_registration_timeout_ms}"
+if ((effective_registration_timeout_ms < zk_session_timeout_ms + zk_connect_timeout_ms)); then
+    effective_registration_timeout_ms=$((zk_session_timeout_ms + zk_connect_timeout_ms))
+fi
+startup_timeout_ms=$((zk_connect_timeout_ms + effective_registration_timeout_ms + 5000))
+startup_attempts=$(((startup_timeout_ms + 99) / 100))
 ready=false
-for _ in {1..100}; do
+for ((attempt = 0; attempt < startup_attempts; ++attempt)); do
     if ! kill -0 "${new_pid}" 2>/dev/null; then
         rm -f -- "${pid_file}"
         echo "UserService exited during startup; inspect ${log_file}" >&2
@@ -68,8 +89,12 @@ for _ in {1..100}; do
 done
 if [[ "${ready}" != true ]]; then
     kill "${new_pid}" 2>/dev/null || true
+    for _ in {1..50}; do
+        if ! kill -0 "${new_pid}" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
     rm -f -- "${pid_file}"
-    echo "UserService did not listen on ${rpc_ip}:${rpc_port}; inspect ${log_file}" >&2
+    echo "UserService did not listen on ${rpc_ip}:${rpc_port} within ${startup_timeout_ms} ms; inspect ${log_file}" >&2
     exit 1
 fi
 echo "started UserService pid=${new_pid} log=${log_file}"

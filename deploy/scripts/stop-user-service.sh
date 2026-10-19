@@ -13,10 +13,14 @@ fi
 pid="$(<"${pid_file}")"
 if [[ "${pid}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
     kill "${pid}"
-    for _ in {1..20}; do
+    for _ in {1..100}; do
         if ! kill -0 "${pid}" 2>/dev/null; then break; fi
         sleep 0.1
     done
+    if kill -0 "${pid}" 2>/dev/null; then
+        echo "UserService PID ${pid} did not exit after SIGTERM; PID file retained" >&2
+        exit 1
+    fi
 fi
 rm -f -- "${pid_file}"
 echo "stopped UserService"
