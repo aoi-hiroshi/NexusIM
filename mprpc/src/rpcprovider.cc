@@ -17,6 +17,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace
@@ -57,6 +58,37 @@ bool deadlineExpired(std::int64_t deadlineUnixMs)
                          std::chrono::system_clock::now().time_since_epoch())
                          .count();
     return now >= deadlineUnixMs;
+}
+
+bool createEphemeralWithRetry(ZkClient &client, const std::string &path,
+                              const std::string &data,
+                              std::chrono::milliseconds timeout,
+                              std::string &error)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    bool waitingLogged = false;
+    for (;;)
+    {
+        int resultCode = ZSYSTEMERROR;
+        if (client.Create(path.c_str(), data.data(),
+                          static_cast<int>(data.size()), ZOO_EPHEMERAL,
+                          &error, &resultCode))
+        {
+            return true;
+        }
+        if (resultCode != ZNODEEXISTS) return false;
+        if (!waitingLogged)
+        {
+            LOG_INFO("waiting for stale ephemeral znode: %s", path.c_str());
+            waitingLogged = true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            error = "ephemeral znode still exists after bounded restart wait";
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 }
 
 class RpcDoneClosure final : public google::protobuf::Closure
@@ -141,12 +173,12 @@ bool RpcProvider::Run()
                   std::placeholders::_2, std::placeholders::_3));
     server.setThreadNum(positiveInt(
         config.LoadOr("provideriothreads", "2"), 2));
-    server.start();
-
     ZkClient zkClient;
     std::string zkError;
     const int connectTimeout = positiveInt(
         config.LoadOr("zkconnecttimeout_ms", "2000"), 2000);
+    const int sessionTimeout = positiveInt(
+        config.LoadOr("zksessiontimeout_ms", "3000"), 3000);
     if (!zkClient.Start(std::chrono::milliseconds(connectTimeout), &zkError))
     {
         LOG_ERR("ZooKeeper registration failed: %s", zkError.c_str());
@@ -165,9 +197,10 @@ bool RpcProvider::Run()
         {
             const std::string methodPath = servicePath + "/" + methodEntry.first;
             const std::string endpoint = ip + ":" + std::to_string(portValue);
-            if (!zkClient.Create(methodPath.c_str(), endpoint.data(),
-                                 static_cast<int>(endpoint.size()),
-                                 ZOO_EPHEMERAL, &zkError))
+            const auto restartWait = std::chrono::milliseconds(
+                std::max(5000, sessionTimeout + connectTimeout));
+            if (!createEphemeralWithRetry(zkClient, methodPath, endpoint,
+                                          restartWait, zkError))
             {
                 LOG_ERR("method znode registration failed: %s", zkError.c_str());
                 return false;
@@ -175,6 +208,9 @@ bool RpcProvider::Run()
         }
     }
 
+    // Do not create Muduo I/O threads until every method is registered. This
+    // keeps a registration failure from leaving a non-serving process alive.
+    server.start();
     LOG_INFO("RpcProvider listening on %s:%d", ip.c_str(), portValue);
     m_eventLoop.loop();
     return true;

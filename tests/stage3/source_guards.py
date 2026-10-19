@@ -19,6 +19,7 @@ chat = text("chatserver/src/server/chatservice.cpp")
 chat_header = text("chatserver/include/server/chatservice.hpp")
 service = text("services/user_service/userserviceimpl.cpp")
 proto = text("proto/user_service.proto")
+start_user_service = text("deploy/scripts/start-user-service.sh")
 
 assert "RpcFrameCodec::encode" in channel
 assert "receiveExact" in channel and "::poll" in channel
@@ -31,6 +32,10 @@ assert "executor_.trySubmit" in provider
 assert "queueInLoop" in provider
 assert "retrieveAllAsString" not in provider
 assert "service->CallMethod" in provider
+provider_run = provider.split("bool RpcProvider::Run()", 1)[1]
+assert "createEphemeralWithRetry" in provider_run
+assert "ZNODEEXISTS" in provider
+assert provider_run.index("createEphemeralWithRetry") < provider_run.index("server.start();")
 
 assert "wait_for" in zk
 assert "exit(EXIT_FAILURE)" not in zk
@@ -48,5 +53,9 @@ assert "PasswordHasher::verify" in service
 assert "PasswordHasher::hash" in service
 assert "queryById" in service
 assert "password" not in proto.split("message PublicUser", 1)[1].split("}", 1)[0]
+
+assert "/dev/tcp/" in start_user_service
+assert "UserService exited during startup" in start_user_service
+assert "UserService did not listen" in start_user_service
 
 print("stage3_source_guards: PASS")

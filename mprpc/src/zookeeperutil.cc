@@ -127,10 +127,11 @@ bool ZkClient::Connected() const
 }
 
 bool ZkClient::Create(const char *path, const char *data, int datalen,
-                      int state, std::string *error)
+                      int state, std::string *error, int *resultCode)
 {
     if (m_zhandle == nullptr || !Connected())
     {
+        if (resultCode != nullptr) *resultCode = ZCONNECTIONLOSS;
         if (error != nullptr) *error = "ZooKeeper is not connected";
         return false;
     }
@@ -138,12 +139,18 @@ bool ZkClient::Create(const char *path, const char *data, int datalen,
     const int exists = zoo_exists(m_zhandle, path, 0, nullptr);
     if (exists == ZOK)
     {
-        if (state == 0) return true;
+        if (state == 0)
+        {
+            if (resultCode != nullptr) *resultCode = ZOK;
+            return true;
+        }
+        if (resultCode != nullptr) *resultCode = ZNODEEXISTS;
         if (error != nullptr) *error = "ephemeral znode already exists";
         return false;
     }
     if (exists != ZNONODE)
     {
+        if (resultCode != nullptr) *resultCode = exists;
         if (error != nullptr) *error = "exists failed: " + zkError(exists);
         return false;
     }
@@ -152,6 +159,7 @@ bool ZkClient::Create(const char *path, const char *data, int datalen,
     const int result = zoo_create(
         m_zhandle, path, data, datalen, &ZOO_OPEN_ACL_UNSAFE, state,
         createdPath.data(), static_cast<int>(createdPath.size()));
+    if (resultCode != nullptr) *resultCode = result;
     if (result != ZOK)
     {
         if (error != nullptr) *error = "create failed: " + zkError(result);

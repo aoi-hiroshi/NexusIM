@@ -48,9 +48,28 @@ fi
 )
 
 new_pid="$(<"${pid_file}")"
-sleep 1
-if ! kill -0 "${new_pid}" 2>/dev/null; then
-    echo "UserService failed to stay running; inspect ${log_file}" >&2
+rpc_ip="$(set -a; source "${env_file}"; set +a; printf '%s' "${MPRPC_RPC_SERVER_IP}")"
+rpc_port="$(set -a; source "${env_file}"; set +a; printf '%s' "${MPRPC_RPC_SERVER_PORT}")"
+probe_host="${rpc_ip}"
+if [[ "${probe_host}" == "0.0.0.0" ]]; then probe_host="127.0.0.1"; fi
+
+ready=false
+for _ in {1..100}; do
+    if ! kill -0 "${new_pid}" 2>/dev/null; then
+        rm -f -- "${pid_file}"
+        echo "UserService exited during startup; inspect ${log_file}" >&2
+        exit 1
+    fi
+    if (exec 3<>"/dev/tcp/${probe_host}/${rpc_port}") 2>/dev/null; then
+        ready=true
+        break
+    fi
+    sleep 0.1
+done
+if [[ "${ready}" != true ]]; then
+    kill "${new_pid}" 2>/dev/null || true
+    rm -f -- "${pid_file}"
+    echo "UserService did not listen on ${rpc_ip}:${rpc_port}; inspect ${log_file}" >&2
     exit 1
 fi
 echo "started UserService pid=${new_pid} log=${log_file}"
