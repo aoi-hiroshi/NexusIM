@@ -2,9 +2,9 @@
 
 NexusIM 是基于施磊课程 ChatServer 与 MPRPC 示例代码演进的 C++17 分布式即时通信项目。
 
-当前仓库已完成并实机验证 **阶段 2：Redis Pub/Sub + Nginx 双节点集群**。
-阶段 3 的 MPRPC 加固和独立 UserService 源码已经完成，Windows 可移植测试已通过，
-尚待 Ubuntu 目标机执行 Protobuf/Muduo/ZooKeeper/MySQL 的真实编译与联调。
+当前仓库已完成并实机验证 **阶段 2：Redis Pub/Sub + Nginx 双节点集群** 和
+**阶段 3：MPRPC 加固与独立 UserService 拆分**。Stage 3 已在 Ubuntu 目标机完成
+Protobuf/Muduo/ZooKeeper/MySQL 真实构建、RPC/故障注入及 Stage 1/2 最终回归。
 Qt UI 和 AIService 尚未开发；完整 V1 仍不具备发布条件。
 
 ## 当前目录
@@ -19,6 +19,7 @@ Qt UI 和 AIService 尚未开发；完整 V1 仍不具备发布条件。
 - `docs/stage1-implementation.md`：阶段 1 设计、实际测试结果与 Linux 验收步骤。
 - `docs/stage2-cluster.md`：阶段 2 路由、部署、可靠性边界与可复现验收步骤。
 - `docs/stage3-mprpc-user-service.md`：阶段 3 RPC 协议、线程模型、构建、启动和验收步骤。
+- `docs/stage3-test-report.md`：阶段 3 Linux 实机、故障注入及最终回归的真实测试报告。
 - `docs/v1-test-report.md`：当前 V1 测试结论、真实证据、未完成项和发布判定。
 - `deploy/`：双实例环境模板、Redis 模板、Nginx stream 配置与启动脚本。
 
@@ -32,7 +33,7 @@ V1 不承诺 ACK 可靠投递、多设备同步、复杂历史、RPC 多实例�
 
 ## 构建状态
 
-阶段 1/2 回归及阶段 3 RPC 帧测试已在 VS2019 下通过；Linux 目标机已完成旧基线 ChatServer 编译、双节点
-Redis Pub/Sub、Nginx 3/3 分流、Redis 故障回退和节点崩溃 TTL 验证。真实证据、
-尚未执行项及非生产边界见 `docs/v1-test-report.md`。阶段 3 新增 Linux 代码不得在
-目标机验证前描述为编译或集成通过。
+阶段 1/2 回归及阶段 3 RPC 帧测试已在 VS2019 下通过；Linux 目标机已完成双节点
+Redis Pub/Sub、Nginx 3/3 分流、Redis 故障回退、节点崩溃 TTL、独立 UserService、
+真实 RPC Deadline、慢 RPC 隔离和断线生命周期验证。真实证据与非生产边界见
+`docs/v1-test-report.md` 和 `docs/stage3-test-report.md`。

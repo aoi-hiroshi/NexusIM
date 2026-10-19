@@ -2,7 +2,8 @@
 
 ## 1. 当前结论
 
-阶段 3 已完成 Windows 工作区内的源码实现和平台无关测试。以下结果已真实执行：
+阶段 3 已完成 Windows 工作区源码实现、平台无关测试及 Linux 目标机实机验收。
+完整证据见 [`stage3-test-report.md`](stage3-test-report.md)。以下结果已真实执行：
 
 - VS2019 `stage3_rpc_frame_tests`：1/1 通过；
 - VS2019 阶段 1 `stage1_core_tests`：1/1 回归通过；
@@ -10,6 +11,11 @@
 - `tests/stage2/source_guards.py`：通过；
 - `tests/stage3/source_guards.py`：通过；
 - Stage 1/2/3 Python 探针 `compileall`：通过。
+- Linux 根 CMake：ChatServer、UserService 和四个 Stage 3 测试目标构建成功；
+- Linux CTest：RPC frame/protocol 2/2 通过；
+- Linux 真实 UserService Register/Login/QueryUser 与 RPC transport 探针：通过；
+- UserService/ZooKeeper 故障、RPC Deadline、EventLoop 非阻塞和断线生命周期：通过；
+- Stage 1/2 Linux 最终回归：通过。
 
 Windows 上也真实执行了统一根 CMake 配置，停止于：
 
@@ -17,15 +23,15 @@ Windows 上也真实执行了统一根 CMake 配置，停止于：
 Could NOT find Protobuf (missing: Protobuf_INCLUDE_DIR)
 ```
 
-这与当前机器没有 `protoc`/Protobuf C++ 开发包的环境检查一致，不记为 Linux 构建失败，
-也不记为 Stage 3 服务端编译通过。
+这与当前机器没有 `protoc`/Protobuf C++ 开发包的环境检查一致，不记为 Windows 服务端
+构建通过。Linux 构建结果由目标机独立验证并记录在测试报告中。
 
 本轮还尝试重新启用 `stage1_security_tests`，CMake 找到 OpenSSL 3.6.3 头文件但未找到
 `OPENSSL_CRYPTO_LIBRARY`，因此该测试没有在本轮重新执行。历史 Linux PBKDF2 证据
-仍保留在 V1 报告中；UserService 的真实哈希行为必须随 Linux Stage 3 验收重测。
+仍保留在 V1 报告中；UserService 的真实哈希行为已在 Linux Stage 3 验收中重测通过。
 
-Windows 没有安装 Linux Muduo、ZooKeeper C client 和 Protobuf 工具链，因此没有把
-“源码完成”描述成 Linux 编译成功。本文第 8 节以后均为目标机待执行步骤。
+Windows 没有安装 Linux Muduo、ZooKeeper C client 和 Protobuf 工具链，因此 Windows
+结果未替代 Linux 证据。本文第 8 节以后保留可复现的目标机构建与验收命令。
 
 ## 2. 进程与调用关系
 
@@ -221,7 +227,7 @@ tail -n 100 run/user-service/logs/user-service.log
 tail -n 100 run/chatservers/logs/chatserver-1.log
 ```
 
-## 10. Linux 验收命令（当前待执行）
+## 10. Linux 验收命令（已执行，保留用于复现）
 
 纯协议及真实 RPC：
 
@@ -272,7 +278,6 @@ python3 tests/stage2/cluster_probe.py
 
 ## 11. 当前明确限制
 
-- Linux 新增目标尚未实机编译和联调；
 - V1 单 UserService 实例，每次 RPC 使用一个短连接；
 - Provider 不强杀已经进入 MySQL 调用的任务，Deadline 后只丢弃迟到响应；
 - ZooKeeper 会话失效后的自动重新注册不在本阶段范围；
