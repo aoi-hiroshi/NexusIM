@@ -36,6 +36,11 @@ add_library(mprpc
     ${MPRPC_ENVELOPE_SRCS}
     ${MPRPC_ENVELOPE_HDRS})
 
+# The ZooKeeper C headers expose the synchronous API (zoo_create,
+# zoo_exists, and related calls) only for the multi-threaded client build.
+# Keep this definition on the mprpc target so it matches zookeeper_mt.
+target_compile_definitions(mprpc PUBLIC THREADED)
+
 target_include_directories(mprpc
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/include
