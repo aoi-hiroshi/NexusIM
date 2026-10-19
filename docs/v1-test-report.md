@@ -6,7 +6,7 @@
 >
 > Stage 3 Linux 被测提交：`ba686aca0e143cc9dc7b7b1faa28636bbddd8acb`
 >
-> 当前结论：**阶段 1、阶段 2、阶段 3 已达到各自当前范围的验收条件；Qt5 客户端、AIService 和完整 Docker Compose 尚未实现，完整 V1 仍不具备发布条件。**
+> 当前结论：**阶段 1、阶段 2、阶段 3 已达到各自当前范围的验收条件；Stage 4 Qt5 客户端已完成 Windows 编译、自动化测试、打包与启动验证，但尚未执行 Windows/Linux 真实双端联调；AIService 和完整 Docker Compose 尚未实现，完整 V1 仍不具备发布条件。**
 
 ## 1. 执行摘要
 
@@ -15,7 +15,8 @@
 - Stage 2 的集群协议单测、线程边界源码守卫和 Python 探针语法检查已经通过；Linux 实机成功编译并启动两个 ChatServer，Redis 两个节点频道在空闲 10 秒后仍各保持 1 个订阅者。
 - 本节点直发、双向跨节点 Pub/Sub、跨节点重复登录、离线单次入库、Nginx `:8000` 轮询分流、Redis 停机显式失败与离线回退、节点崩溃后 TTL 清理均取得真实通过输出。
 - Stage 3 已完成 MPRPC 双向分帧、总 Deadline、Provider 线程隔离和独立 UserService；Windows 可移植测试与 Linux 真实 RPC、故障注入、生命周期和 Stage 1/2 回归均通过。
-- V1 规划中的 Qt 5.12.8 客户端、AIService、Docker Compose 尚未实现或验收。本报告不能作为完整 V1 发布批准。
+- Stage 4 Qt 5.12.8 客户端已通过 Debug/Release 构建、4 组 QtTest、Mock TCP、发布打包和双进程启动验证；真实 Linux 后端双端聊天尚未执行。
+- V1 规划中的 AIService、真实 LLM API 和 Docker Compose 尚未实现或验收。本报告不能作为完整 V1 发布批准。
 - 未执行吞吐量、P95/P99 延迟、长期稳定性或内存泄漏测试，本报告不提供任何推测性性能数据。
 
 ## 2. 测试范围与判定规则
@@ -25,7 +26,8 @@
 1. Stage 1：TCP FrameCodec、业务线程隔离、connection strand、PendingRequest、认证会话、密码安全、MySQL schema、Redis Presence。
 2. Stage 2：Redis Pub/Sub 路由协议、双 ChatServer 部署脚本、Nginx Stream 配置、集群与故障探针。
 3. Stage 3：MPRPC 帧协议、Controller Deadline、Provider 有界执行器、独立 UserService、ChatService RPC 接入及目标机探针。
-4. 已规划但尚未实现的 V1 模块仅记录缺口，不按“失败”伪装成已执行测试。
+4. Stage 4：Qt5 FrameCodec、JSON 适配、RequestManager、Mock TCP、桌面 UI、Release 打包和双进程启动。
+5. 已规划但尚未实现的 V1 模块仅记录缺口，不按“失败”伪装成已执行测试。
 
 状态含义：
 
@@ -47,7 +49,7 @@
 | Windows SDK | 10.0.19041.0 |
 | CMake | 3.20.21032501-MSVC_2，使用 VS2019 内置路径 |
 | Python | 3.14.6 |
-| Qt | `E:\Qt\Qt5.12.8` 存在；本报告未编译 Qt 客户端 |
+| Qt | 5.12.8 `msvc2017_64`；Debug/Release 客户端均已实际编译 |
 | 限制 | 无 WSL/Muduo/MySQL/hiredis/Nginx 集成环境，不替代 Linux 实机验收 |
 
 ### 3.2 Linux 目标机（基于用户提供的真实输出）
@@ -105,8 +107,13 @@
 | S3-05 | 慢 RPC 期间 heartbeat 不阻塞 | Linux双连接 | 通过 | 3 秒慢 RPC 期间 heartbeat 单次观测 0.001 秒 |
 | S3-06 | RPC 中途断线不发送旧结果且不留 Presence | Linux | 通过 | `stage3_rpc_lifecycle_probe: PASS`，最终 Redis key 为 `(nil)` |
 | S3-07 | UserService 快速重启与旧临时节点 | Linux + ZooKeeper | 通过 | 有界等待分支实际触发，3.878 秒恢复监听和注册 |
+| S4-01 | Qt FrameCodec 半包/粘包/多帧/非法长度 | Windows QtTest | 通过 | Debug 与 Release `qt_framecodec_tests` 均通过 |
+| S4-02 | JSON 协议与 RequestManager | Windows QtTest | 通过 | 协议及请求生命周期两组测试均通过 |
+| S4-03 | QTcpSocket 异步收包、断线和连接拒绝 | Windows Mock TCP | 通过 | 本机 `QTcpServer` 驱动的 `qt_networkclient_tests` 通过 |
+| S4-04 | Release 打包、启动和双开 | Windows | 通过 | Qt/VC142 运行库齐全；两个独立进程同时创建窗口 |
+| S4-05 | Windows 客户端连接 Linux 双节点/Nginx | Windows + Linux | 待执行 | 当前没有真实 Windows/Linux 连接输出，不以 Mock 结果替代 |
 | V1-01 | UserService 经 MPRPC 的 Login/Register/QueryUser | Linux | 通过 | Linux 构建、ZooKeeper 注册、真实 MySQL RPC 及密码哈希均通过 |
-| V1-02 | Qt 5.12.8 登录、注册、单聊、AI窗口 | Windows | 未实现 | 当前阶段明确未开发 Qt UI |
+| V1-02 | Qt 5.12.8 登录、注册、单聊、AI入口 | Windows | 部分通过 | 客户端实现、单测、打包和启动通过；真实后端双端联调待执行，AI 仅 Stage 5 占位 |
 | V1-03 | AIService + LLM API | Linux | 未实现 | 尚未开发，不存在真实 API 测试 |
 | V1-04 | Docker Compose 全栈启动 | Linux | 未实现/待执行 | 当前只有 Stage 2 部署配置和脚本，未完成全栈 Compose 验收 |
 

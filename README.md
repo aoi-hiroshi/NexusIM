@@ -5,7 +5,8 @@ NexusIM 是基于施磊课程 ChatServer 与 MPRPC 示例代码演进的 C++17 �
 当前仓库已完成并实机验证 **阶段 2：Redis Pub/Sub + Nginx 双节点集群** 和
 **阶段 3：MPRPC 加固与独立 UserService 拆分**。Stage 3 已在 Ubuntu 目标机完成
 Protobuf/Muduo/ZooKeeper/MySQL 真实构建、RPC/故障注入及 Stage 1/2 最终回归。
-Qt UI 和 AIService 尚未开发；完整 V1 仍不具备发布条件。
+Stage 4 已新增 Qt 5.12.8 桌面客户端；Windows 本机编译、QtTest、Mock TCP 和界面启动
+验证记录见对应文档，真实 Linux 后端双端联调仍需执行。AIService 留待 Stage 5。
 
 ## 当前目录
 
@@ -13,6 +14,7 @@ Qt UI 和 AIService 尚未开发；完整 V1 仍不具备发布条件。
 - `mprpc/`：在原课程 MPRPC 核心上增加双向分帧、总 Deadline、结构化错误和 Provider 有界执行器。
 - `proto/`：ChatServer 与 UserService 共享的 Protobuf 业务接口。
 - `services/user_service/`：独立 UserService 进程，负责 Login、Register、QueryUser。
+- `client/qt/`：独立 Qt 5.12.8 Windows 客户端、QSS、QtTest 与打包脚本。
 - `docs/phase0-baseline.md`：阶段 0 环境与基线记录。
 - `docs/concurrency-presence-design.md`：异步 RPC、连接顺序和 Redis Presence 的强制设计规则。
 - `docs/linux-build-checklist.md`：后续 Linux 编译与依赖核查命令。
@@ -20,6 +22,9 @@ Qt UI 和 AIService 尚未开发；完整 V1 仍不具备发布条件。
 - `docs/stage2-cluster.md`：阶段 2 路由、部署、可靠性边界与可复现验收步骤。
 - `docs/stage3-mprpc-user-service.md`：阶段 3 RPC 协议、线程模型、构建、启动和验收步骤。
 - `docs/stage3-test-report.md`：阶段 3 Linux 实机、故障注入及最终回归的真实测试报告。
+- `docs/stage4-protocol-matrix.md`：客户端所适配的真实 JSON 协议与功能开放状态。
+- `docs/stage4-qt-client.md`：Qt 客户端实现、构建、打包、测试和双端联调步骤。
+- `docs/stage4-test-report.md`：Stage 4 Windows 实际编译、测试、打包、启动结果与未验证边界。
 - `docs/v1-test-report.md`：当前 V1 测试结论、真实证据、未完成项和发布判定。
 - `deploy/`：双实例环境模板、Redis 模板、Nginx stream 配置与启动脚本。
 
