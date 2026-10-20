@@ -5,7 +5,9 @@ link Muduo, MySQL, Redis, ZooKeeper, or MPRPC. It communicates with an existing
 ChatServer or Nginx Stream endpoint using the Stage 1 wire format: a four-byte
 big-endian length followed by one UTF-8 JSON object.
 
-Stage 5 adds a non-blocking DeepSeek AI page. The Windows client still talks
+Stage 5 adds a non-blocking DeepSeek AI page. Stage 6 adds real friend and
+group management, member lists, distributed group chat, offline group-message
+restore and per-group unread indicators through `SocialController`. The Windows client talks
 only to ChatServer; API credentials and HTTPS model calls stay in the Linux
 AIService. AI requests use correlated message IDs 14/15 and a 90-second UI
 timeout.

@@ -56,6 +56,13 @@ sem_t rwsem;
 // 记录登录状态
 atomic_bool g_isLoginSuccess{false};
 atomic_uint64_t g_heartbeatSequence{1};
+atomic_uint64_t g_businessSequence{1};
+
+string nextBusinessRequestId()
+{
+    return "cli-s6-" + std::to_string(g_currentUser.getId()) + "-" +
+           std::to_string(g_businessSequence.fetch_add(1));
+}
 
 
 // 接收线程
@@ -370,6 +377,11 @@ void readTaskHandler(int clientfd)
             cerr << "server error: " << js.dump() << endl;
             return;
         }
+        if (msgtype >= ADD_FRIEND_MSG_ACK && msgtype <= GROUP_CHAT_MSG_ACK)
+        {
+            cout << "business response: " << js.dump() << endl;
+            return;
+        }
         });
         if (result.status == nexusim::FrameCodec::Status::InvalidLength)
         {
@@ -494,6 +506,7 @@ void addfriend(int clientfd, string str)
     js["msgid"] = ADD_FRIEND_MSG;
     js["id"] = g_currentUser.getId();
     js["friendid"] = friendid;
+    js["request_id"] = nextBusinessRequestId();
     string buffer = js.dump();
 
     if (!sendFramedJson(clientfd, buffer))
@@ -546,6 +559,7 @@ void creategroup(int clientfd, string str)
     js["id"] = g_currentUser.getId();
     js["groupname"] = groupname;
     js["groupdesc"] = groupdesc;
+    js["request_id"] = nextBusinessRequestId();
     string buffer = js.dump();
 
     if (!sendFramedJson(clientfd, buffer))
@@ -561,6 +575,7 @@ void addgroup(int clientfd, string str)
     js["msgid"] = ADD_GROUP_MSG;
     js["id"] = g_currentUser.getId();
     js["groupid"] = groupid;
+    js["request_id"] = nextBusinessRequestId();
     string buffer = js.dump();
 
     if (!sendFramedJson(clientfd, buffer))
@@ -588,6 +603,7 @@ void groupchat(int clientfd, string str)
     js["groupid"] = groupid;
     js["msg"] = message;
     js["time"] = getCurrentTime();
+    js["request_id"] = nextBusinessRequestId();
     string buffer = js.dump();
 
     if (!sendFramedJson(clientfd, buffer))

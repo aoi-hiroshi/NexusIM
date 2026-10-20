@@ -9,13 +9,13 @@ bool UserModel::insert(User &user)
     MySQL mysql;
     if (mysql.connect())
     {
-        const string sql = "insert into `User`(name, password, state) values('" +
-                           mysql.escape(user.getName()) + "', '" +
-                           mysql.escape(user.getPwd()) + "', 'offline')";
-        if (mysql.update(sql))
+        const auto inserted = mysql.executePrepared(
+            "insert into `User`(`name`,`password`,`state`) values(?,?,'offline')",
+            {MySQLParameter::text(user.getName()),
+             MySQLParameter::text(user.getPwd())});
+        if (inserted.success)
         {
-            // 获取插入成功的用户数据生成的主键id
-            user.setId(mysql_insert_id(mysql.getConnection()));
+            user.setId(static_cast<int>(inserted.insertId));
             return true;
         }
     }
@@ -35,12 +35,11 @@ UserQueryStatus UserModel::queryById(int id, User &user)
 {
     user = User();
     if (id <= 0) return UserQueryStatus::NotFound;
-    const string sql = "select id, name, password, state from `User` where id = " +
-                       std::to_string(id) + " limit 1";
-
     MySQL mysql;
     if (!mysql.connect()) return UserQueryStatus::Error;
-    MYSQL_RES *res = mysql.query(sql);
+    MYSQL_RES *res = mysql.queryPrepared(
+        "select `id`,`name`,`password`,`state` from `User` where `id`=? limit 1",
+        {MySQLParameter::integer(id)});
     if (res == nullptr) return UserQueryStatus::Error;
     MYSQL_ROW row = mysql_fetch_row(res);
     if (row == nullptr)
@@ -68,13 +67,13 @@ bool UserModel::exists(int id, bool &querySucceeded)
 bool UserModel::updateState(User user)
 {
     // 1.组装sql语句
-    char sql[1024] = {0};
-    sprintf(sql, "update `User` set state = '%s' where id = %d", user.getState().c_str(), user.getId());
-
     MySQL mysql;
     if (mysql.connect())
     {
-        if (mysql.update(sql))
+        if (mysql.executePrepared(
+                "update `User` set `state`=? where `id`=?",
+                {MySQLParameter::text(user.getState()),
+                 MySQLParameter::integer(user.getId())}).success)
         {
             return true;
         }
@@ -89,10 +88,9 @@ bool UserModel::updatePassword(int id, const std::string &encodedPassword)
     {
         return false;
     }
-    const string sql = "update `User` set password = '" +
-                       mysql.escape(encodedPassword) + "' where id = " +
-                       std::to_string(id);
-    return mysql.update(sql);
+    return mysql.executePrepared(
+        "update `User` set `password`=? where `id`=?",
+        {MySQLParameter::text(encodedPassword), MySQLParameter::integer(id)}).success;
 }
 
 // 重置用户的状态信息

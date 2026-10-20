@@ -50,6 +50,65 @@ QJsonObject aiChatRequest(const QString &requestId,
             {QStringLiteral("prompt"), prompt}};
 }
 
+QJsonObject addFriendRequest(const QString &requestId, int friendId)
+{
+    return {{QStringLiteral("msgid"), AddFriend},
+            {QStringLiteral("request_id"), requestId},
+            {QStringLiteral("friendid"), friendId}};
+}
+
+QJsonObject queryFriendsRequest(const QString &requestId)
+{
+    return {{QStringLiteral("msgid"), QueryFriends},
+            {QStringLiteral("request_id"), requestId}};
+}
+
+QJsonObject createGroupRequest(const QString &requestId, const QString &name,
+                               const QString &description)
+{
+    return {{QStringLiteral("msgid"), CreateGroup},
+            {QStringLiteral("request_id"), requestId},
+            {QStringLiteral("groupname"), name},
+            {QStringLiteral("groupdesc"), description}};
+}
+
+QJsonObject joinGroupRequest(const QString &requestId, int groupId)
+{
+    return {{QStringLiteral("msgid"), JoinGroup},
+            {QStringLiteral("request_id"), requestId},
+            {QStringLiteral("groupid"), groupId}};
+}
+
+QJsonObject queryGroupsRequest(const QString &requestId)
+{
+    return {{QStringLiteral("msgid"), QueryGroups},
+            {QStringLiteral("request_id"), requestId}};
+}
+
+QJsonObject queryGroupMembersRequest(const QString &requestId, int groupId)
+{
+    return {{QStringLiteral("msgid"), QueryGroupMembers},
+            {QStringLiteral("request_id"), requestId},
+            {QStringLiteral("groupid"), groupId}};
+}
+
+QJsonObject leaveGroupRequest(const QString &requestId, int groupId)
+{
+    return {{QStringLiteral("msgid"), LeaveGroup},
+            {QStringLiteral("request_id"), requestId},
+            {QStringLiteral("groupid"), groupId}};
+}
+
+QJsonObject groupChatRequest(const QString &requestId, int groupId,
+                             const QString &message, const QString &timeText)
+{
+    return {{QStringLiteral("msgid"), GroupChat},
+            {QStringLiteral("request_id"), requestId},
+            {QStringLiteral("groupid"), groupId},
+            {QStringLiteral("msg"), message},
+            {QStringLiteral("time"), timeText}};
+}
+
 QString responseErrorText(const QJsonObject &object)
 {
     const QString message = object.value(QStringLiteral("errmsg")).toString();

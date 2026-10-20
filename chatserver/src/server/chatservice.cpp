@@ -94,6 +94,36 @@ bool validOpaqueId(const std::string &value)
                character == '_' || character == '.' || character == ':';
     });
 }
+
+bool requestIdField(const json &request, std::string &requestId)
+{
+    return stringField(request, "request_id", requestId) && validOpaqueId(requestId);
+}
+
+void sendBusinessResponse(const muduo::net::TcpConnectionPtr &connection,
+                          int responseType, const std::string &requestId,
+                          bool ok, const std::string &error = {},
+                          const std::string &message = {},
+                          json fields = json::object())
+{
+    fields["msgid"] = responseType;
+    fields["request_id"] = requestId;
+    fields["ok"] = ok;
+    if (!error.empty()) fields["error"] = error;
+    if (!message.empty()) fields["errmsg"] = message;
+    nexusim::sendFramed(connection, fields.dump());
+}
+
+std::string serverTimeText()
+{
+    std::string value = muduo::Timestamp::now().toFormattedString(false);
+    if (value.size() >= 8)
+    {
+        value.insert(4, "-");
+        value.insert(7, "-");
+    }
+    return value;
+}
 } // namespace
 
 ChatService *ChatService::instance()
@@ -107,8 +137,8 @@ ChatService::ChatService()
       presenceTtlSeconds_(environmentInt("CHAT_PRESENCE_TTL_SECONDS", 90)),
       redisInboundExecutor_("redis-inbound", 1, 512)
 {
-    // V1 allowlist. Friend/group handlers remain compiled for later migration but
-    // are deliberately unreachable over the network.
+    // Explicit allowlist: only handlers that have passed the Stage 1-6 security
+    // review are reachable over the network.
     handlers_.emplace(LOGIN_MSG, std::bind(&ChatService::login, this,
                                            std::placeholders::_1,
                                            std::placeholders::_2,
@@ -125,6 +155,38 @@ ChatService::ChatService()
                                               std::placeholders::_1,
                                               std::placeholders::_2,
                                               std::placeholders::_3));
+    handlers_.emplace(ADD_FRIEND_MSG, std::bind(&ChatService::addFriend, this,
+                                                std::placeholders::_1,
+                                                std::placeholders::_2,
+                                                std::placeholders::_3));
+    handlers_.emplace(QUERY_FRIENDS_MSG, std::bind(&ChatService::queryFriends, this,
+                                                   std::placeholders::_1,
+                                                   std::placeholders::_2,
+                                                   std::placeholders::_3));
+    handlers_.emplace(CREATE_GROUP_MSG, std::bind(&ChatService::createGroup, this,
+                                                  std::placeholders::_1,
+                                                  std::placeholders::_2,
+                                                  std::placeholders::_3));
+    handlers_.emplace(ADD_GROUP_MSG, std::bind(&ChatService::addGroup, this,
+                                               std::placeholders::_1,
+                                               std::placeholders::_2,
+                                               std::placeholders::_3));
+    handlers_.emplace(QUERY_GROUPS_MSG, std::bind(&ChatService::queryGroups, this,
+                                                  std::placeholders::_1,
+                                                  std::placeholders::_2,
+                                                  std::placeholders::_3));
+    handlers_.emplace(QUERY_GROUP_MEMBERS_MSG,
+                      std::bind(&ChatService::queryGroupMembers, this,
+                                std::placeholders::_1, std::placeholders::_2,
+                                std::placeholders::_3));
+    handlers_.emplace(LEAVE_GROUP_MSG, std::bind(&ChatService::leaveGroup, this,
+                                                 std::placeholders::_1,
+                                                 std::placeholders::_2,
+                                                 std::placeholders::_3));
+    handlers_.emplace(GROUP_CHAT_MSG, std::bind(&ChatService::groupChat, this,
+                                                std::placeholders::_1,
+                                                std::placeholders::_2,
+                                                std::placeholders::_3));
 
     redis_.initNotifyHandler([this](nexusim::ClusterDelivery delivery) {
         enqueueRedisDelivery(std::move(delivery));
@@ -472,6 +534,36 @@ void ChatService::login(const muduo::net::TcpConnectionPtr &connection,
         }
         response["friends"] = encodedFriends;
     }
+    bool groupsLoaded = false;
+    const auto groups = groupModel_.queryGroups(id, &groupsLoaded);
+    if (groupsLoaded && !groups.empty())
+    {
+        std::vector<std::string> encodedGroups;
+        for (const Group &group : groups)
+        {
+            json value{{"id", group.getId()}, {"groupname", group.getName()},
+                       {"groupdesc", group.getDesc()}, {"role", group.getRole()}};
+            bool authorized = false;
+            bool membersLoaded = false;
+            const auto members = groupModel_.queryMembers(
+                id, group.getId(), authorized, membersLoaded);
+            if (authorized && membersLoaded)
+            {
+                std::vector<std::string> encodedMembers;
+                for (const GroupUser &member : members)
+                {
+                    json memberValue{{"id", member.getId()},
+                                     {"name", member.getName()},
+                                     {"state", "unknown"},
+                                     {"role", member.getRole()}};
+                    encodedMembers.push_back(memberValue.dump());
+                }
+                value["users"] = std::move(encodedMembers);
+            }
+            encodedGroups.push_back(value.dump());
+        }
+        response["groups"] = std::move(encodedGroups);
+    }
     nexusim::sendFramed(connection, response.dump());
     LOG_INFO << "node=" << nodeId_ << " user=" << id
              << " login connection=" << connection->name();
@@ -604,6 +696,409 @@ void ChatService::oneChat(const muduo::net::TcpConnectionPtr &connection,
     LOG_INFO << "node=" << nodeId_ << " direct-chat redis sender="
              << session->userId << " recipient=" << recipientId
              << " target_node=" << lookup.presence.nodeId;
+}
+
+void ChatService::addFriend(const muduo::net::TcpConnectionPtr &connection,
+                            json &request, muduo::Timestamp)
+{
+    const auto session = sessionFor(connection);
+    std::string requestId;
+    int friendId = -1;
+    if (!session || !session->authenticated)
+    {
+        sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
+                             "UNAUTHENTICATED", "login is required");
+        return;
+    }
+    if (!requestIdField(request, requestId) ||
+        !intField(request, "friendid", friendId) || friendId <= 0)
+    {
+        sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
+                             "INVALID_ARGUMENT", "valid request_id and friendid are required");
+        return;
+    }
+    if (friendId == session->userId)
+    {
+        sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
+                             "CANNOT_ADD_SELF", "a user cannot add itself");
+        return;
+    }
+
+    const auto deadline = nexusim::PendingRequestRegistry::Clock::now() + rpcTimeout();
+    const std::string tracked = beginRpcRequest(*session, deadline);
+    if (tracked.empty())
+    {
+        sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
+                             "SERVER_BUSY", "could not track user query");
+        return;
+    }
+    const auto user = userServiceClient_.queryUser(friendId, deadline);
+    const bool allowExpired = !user.call.ok &&
+                              user.call.error == mprpc::RpcErrorCode::DeadlineExceeded;
+    if (!completeRpcRequest(tracked, *session, allowExpired) ||
+        !isCurrentSession(*session)) return;
+    if (!user.call.ok)
+    {
+        sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
+                             rpcErrorName(user.call.error), user.call.message);
+        return;
+    }
+    if (!user.found)
+    {
+        sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
+                             "USER_NOT_FOUND", "target user does not exist");
+        return;
+    }
+
+    const AddFriendStatus status = friendModel_.addBidirectional(
+        session->userId, friendId);
+    if (status == AddFriendStatus::Error)
+    {
+        sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
+                             "DATABASE_ERROR", "friend relationship could not be saved");
+        return;
+    }
+    if (status == AddFriendStatus::UserNotFound)
+    {
+        sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
+                             "USER_NOT_FOUND", "target user does not exist");
+        return;
+    }
+    json fields{{"friend", {{"id", friendId}, {"name", user.username}}},
+                {"already_friends", status == AddFriendStatus::AlreadyFriends}};
+    sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, true, {}, {},
+                         std::move(fields));
+}
+
+void ChatService::queryFriends(const muduo::net::TcpConnectionPtr &connection,
+                               json &request, muduo::Timestamp)
+{
+    const auto session = sessionFor(connection);
+    std::string requestId;
+    if (!session || !session->authenticated)
+    {
+        sendBusinessResponse(connection, QUERY_FRIENDS_MSG_ACK, requestId, false,
+                             "UNAUTHENTICATED", "login is required");
+        return;
+    }
+    if (!requestIdField(request, requestId))
+    {
+        sendBusinessResponse(connection, QUERY_FRIENDS_MSG_ACK, requestId, false,
+                             "INVALID_ARGUMENT", "valid request_id is required");
+        return;
+    }
+    bool succeeded = false;
+    const auto friends = friendModel_.query(session->userId, &succeeded);
+    if (!succeeded)
+    {
+        sendBusinessResponse(connection, QUERY_FRIENDS_MSG_ACK, requestId, false,
+                             "DATABASE_ERROR", "friend list could not be loaded");
+        return;
+    }
+    json values = json::array();
+    for (const User &friendUser : friends)
+        values.push_back({{"id", friendUser.getId()}, {"name", friendUser.getName()}});
+    sendBusinessResponse(connection, QUERY_FRIENDS_MSG_ACK, requestId, true, {}, {},
+                         {{"friends", std::move(values)}});
+}
+
+void ChatService::createGroup(const muduo::net::TcpConnectionPtr &connection,
+                              json &request, muduo::Timestamp)
+{
+    const auto session = sessionFor(connection);
+    std::string requestId;
+    std::string name;
+    std::string description;
+    if (!session || !session->authenticated)
+    {
+        sendBusinessResponse(connection, CREATE_GROUP_MSG_ACK, requestId, false,
+                             "UNAUTHENTICATED", "login is required");
+        return;
+    }
+    if (!requestIdField(request, requestId) || !stringField(request, "groupname", name) ||
+        !stringField(request, "groupdesc", description) || name.empty() ||
+        name.size() > 50 || description.size() > 200)
+    {
+        sendBusinessResponse(connection, CREATE_GROUP_MSG_ACK, requestId, false,
+                             "INVALID_ARGUMENT", "invalid group name or description");
+        return;
+    }
+    Group group(-1, name, description);
+    const auto status = groupModel_.createGroup(group, session->userId);
+    if (status != CreateGroupStatus::Created)
+    {
+        sendBusinessResponse(connection, CREATE_GROUP_MSG_ACK, requestId, false,
+                             status == CreateGroupStatus::InvalidUser
+                                 ? "USER_NOT_FOUND" : "DATABASE_ERROR",
+                             "group could not be created");
+        return;
+    }
+    sendBusinessResponse(connection, CREATE_GROUP_MSG_ACK, requestId, true, {}, {},
+                         {{"group", {{"id", group.getId()},
+                                     {"name", group.getName()},
+                                     {"description", group.getDesc()},
+                                     {"role", group.getRole()}}}});
+}
+
+void ChatService::addGroup(const muduo::net::TcpConnectionPtr &connection,
+                           json &request, muduo::Timestamp)
+{
+    const auto session = sessionFor(connection);
+    std::string requestId;
+    int groupId = -1;
+    if (!session || !session->authenticated)
+    {
+        sendBusinessResponse(connection, ADD_GROUP_MSG_ACK, requestId, false,
+                             "UNAUTHENTICATED", "login is required");
+        return;
+    }
+    if (!requestIdField(request, requestId) || !intField(request, "groupid", groupId) ||
+        groupId <= 0)
+    {
+        sendBusinessResponse(connection, ADD_GROUP_MSG_ACK, requestId, false,
+                             "INVALID_ARGUMENT", "valid request_id and groupid are required");
+        return;
+    }
+    const auto status = groupModel_.joinGroup(session->userId, groupId);
+    if (status == JoinGroupStatus::Error || status == JoinGroupStatus::GroupNotFound)
+    {
+        sendBusinessResponse(connection, ADD_GROUP_MSG_ACK, requestId, false,
+                             status == JoinGroupStatus::GroupNotFound
+                                 ? "GROUP_NOT_FOUND" : "DATABASE_ERROR",
+                             status == JoinGroupStatus::GroupNotFound
+                                 ? "group does not exist" : "group membership could not be saved");
+        return;
+    }
+    sendBusinessResponse(connection, ADD_GROUP_MSG_ACK, requestId, true, {}, {},
+                         {{"group_id", groupId},
+                          {"already_member", status == JoinGroupStatus::AlreadyMember}});
+}
+
+void ChatService::queryGroups(const muduo::net::TcpConnectionPtr &connection,
+                              json &request, muduo::Timestamp)
+{
+    const auto session = sessionFor(connection);
+    std::string requestId;
+    if (!session || !session->authenticated)
+    {
+        sendBusinessResponse(connection, QUERY_GROUPS_MSG_ACK, requestId, false,
+                             "UNAUTHENTICATED", "login is required");
+        return;
+    }
+    if (!requestIdField(request, requestId))
+    {
+        sendBusinessResponse(connection, QUERY_GROUPS_MSG_ACK, requestId, false,
+                             "INVALID_ARGUMENT", "valid request_id is required");
+        return;
+    }
+    bool succeeded = false;
+    const auto groups = groupModel_.queryGroups(session->userId, &succeeded);
+    if (!succeeded)
+    {
+        sendBusinessResponse(connection, QUERY_GROUPS_MSG_ACK, requestId, false,
+                             "DATABASE_ERROR", "group list could not be loaded");
+        return;
+    }
+    json values = json::array();
+    for (const Group &group : groups)
+        values.push_back({{"id", group.getId()}, {"name", group.getName()},
+                          {"description", group.getDesc()}, {"role", group.getRole()}});
+    sendBusinessResponse(connection, QUERY_GROUPS_MSG_ACK, requestId, true, {}, {},
+                         {{"groups", std::move(values)}});
+}
+
+void ChatService::queryGroupMembers(const muduo::net::TcpConnectionPtr &connection,
+                                    json &request, muduo::Timestamp)
+{
+    const auto session = sessionFor(connection);
+    std::string requestId;
+    int groupId = -1;
+    if (!session || !session->authenticated)
+    {
+        sendBusinessResponse(connection, QUERY_GROUP_MEMBERS_MSG_ACK, requestId,
+                             false, "UNAUTHENTICATED", "login is required");
+        return;
+    }
+    if (!requestIdField(request, requestId) || !intField(request, "groupid", groupId) ||
+        groupId <= 0)
+    {
+        sendBusinessResponse(connection, QUERY_GROUP_MEMBERS_MSG_ACK, requestId,
+                             false, "INVALID_ARGUMENT",
+                             "valid request_id and groupid are required");
+        return;
+    }
+    bool authorized = false;
+    bool succeeded = false;
+    const auto members = groupModel_.queryMembers(
+        session->userId, groupId, authorized, succeeded);
+    if (!succeeded || !authorized)
+    {
+        sendBusinessResponse(connection, QUERY_GROUP_MEMBERS_MSG_ACK, requestId,
+                             false, succeeded ? "NOT_GROUP_MEMBER" : "DATABASE_ERROR",
+                             succeeded ? "group membership is required"
+                                       : "group members could not be loaded");
+        return;
+    }
+    json values = json::array();
+    for (const GroupUser &member : members)
+        values.push_back({{"id", member.getId()}, {"name", member.getName()},
+                          {"role", member.getRole()}});
+    sendBusinessResponse(connection, QUERY_GROUP_MEMBERS_MSG_ACK, requestId, true,
+                         {}, {}, {{"group_id", groupId},
+                                  {"members", std::move(values)}});
+}
+
+void ChatService::leaveGroup(const muduo::net::TcpConnectionPtr &connection,
+                             json &request, muduo::Timestamp)
+{
+    const auto session = sessionFor(connection);
+    std::string requestId;
+    int groupId = -1;
+    if (!session || !session->authenticated)
+    {
+        sendBusinessResponse(connection, LEAVE_GROUP_MSG_ACK, requestId, false,
+                             "UNAUTHENTICATED", "login is required");
+        return;
+    }
+    if (!requestIdField(request, requestId) || !intField(request, "groupid", groupId) ||
+        groupId <= 0)
+    {
+        sendBusinessResponse(connection, LEAVE_GROUP_MSG_ACK, requestId, false,
+                             "INVALID_ARGUMENT", "valid request_id and groupid are required");
+        return;
+    }
+    const auto status = groupModel_.leaveGroup(session->userId, groupId);
+    if (status != LeaveGroupStatus::Left)
+    {
+        std::string error = "DATABASE_ERROR";
+        std::string message = "group could not be left";
+        if (status == LeaveGroupStatus::NotMember)
+        {
+            error = "NOT_GROUP_MEMBER";
+            message = "user is not a member of this group";
+        }
+        else if (status == LeaveGroupStatus::OwnerCannotLeave)
+        {
+            error = "GROUP_OWNER_CANNOT_LEAVE";
+            message = "the creator cannot leave before ownership transfer is implemented";
+        }
+        else if (status == LeaveGroupStatus::GroupNotFound)
+        {
+            error = "GROUP_NOT_FOUND";
+            message = "group does not exist";
+        }
+        sendBusinessResponse(connection, LEAVE_GROUP_MSG_ACK, requestId, false,
+                             error, message);
+        return;
+    }
+    sendBusinessResponse(connection, LEAVE_GROUP_MSG_ACK, requestId, true, {}, {},
+                         {{"group_id", groupId}});
+}
+
+void ChatService::groupChat(const muduo::net::TcpConnectionPtr &connection,
+                            json &request, muduo::Timestamp)
+{
+    const auto session = sessionFor(connection);
+    std::string requestId;
+    std::string message;
+    int groupId = -1;
+    if (!session || !session->authenticated)
+    {
+        sendBusinessResponse(connection, GROUP_CHAT_MSG_ACK, requestId, false,
+                             "UNAUTHENTICATED", "login is required");
+        return;
+    }
+    if (!requestIdField(request, requestId) || !intField(request, "groupid", groupId) ||
+        groupId <= 0 || !stringField(request, "msg", message) || message.empty() ||
+        message.find_first_not_of(" \t\r\n") == std::string::npos ||
+        message.size() > 65536)
+    {
+        sendBusinessResponse(connection, GROUP_CHAT_MSG_ACK, requestId, false,
+                             "INVALID_ARGUMENT", "invalid group, request id, or message");
+        return;
+    }
+
+    bool senderIsMember = false;
+    bool querySucceeded = false;
+    const auto recipients = groupModel_.queryGroupUsers(
+        session->userId, groupId, senderIsMember, querySucceeded);
+    if (!querySucceeded || !senderIsMember)
+    {
+        sendBusinessResponse(connection, GROUP_CHAT_MSG_ACK, requestId, false,
+                             querySucceeded ? "NOT_GROUP_MEMBER" : "DATABASE_ERROR",
+                             querySucceeded ? "group membership is required"
+                                            : "group members could not be loaded");
+        return;
+    }
+    int maxRecipients = environmentInt("CHAT_GROUP_MAX_RECIPIENTS", 256);
+    if (maxRecipients < 1 || maxRecipients > 1000) maxRecipients = 256;
+    if (recipients.size() > static_cast<std::size_t>(maxRecipients))
+    {
+        sendBusinessResponse(connection, GROUP_CHAT_MSG_ACK, requestId, false,
+                             "GROUP_TOO_LARGE",
+                             "group exceeds the configured V1 broadcast limit");
+        return;
+    }
+
+    json delivery{{"msgid", GROUP_CHAT_MSG}, {"groupid", groupId},
+                  {"id", session->userId}, {"name", session->userName},
+                  {"msg", message}, {"request_id", requestId},
+                  {"time", serverTimeText()}};
+    int localCount = 0;
+    int remoteCount = 0;
+    int offlineCount = 0;
+    int failedCount = 0;
+    std::vector<std::pair<int, std::string>> offlineDeliveries;
+    for (int recipientId : recipients)
+    {
+        json recipientPayload = delivery;
+        recipientPayload["toid"] = recipientId; // internal routing guard
+        const std::string payload = recipientPayload.dump();
+        const auto local = localConnectionForUser(recipientId);
+        if (local)
+        {
+            nexusim::sendFramed(local, payload);
+            ++localCount;
+            continue;
+        }
+        const auto lookup = redis_.lookupPresence(recipientId);
+        if (lookup.status == Redis::LookupStatus::Found)
+        {
+            const auto published = redis_.publishToNode(
+                lookup.presence.nodeId,
+                {recipientId, lookup.presence.sessionId, payload});
+            if (published.status == Redis::PublishStatus::Published)
+            {
+                ++remoteCount;
+                continue;
+            }
+        }
+        // Only the sender node stores offline copies. Subscriber nodes never do.
+        offlineDeliveries.emplace_back(recipientId, payload);
+    }
+    if (!offlineDeliveries.empty())
+    {
+        if (offlineMessageModel_.insertBatch(offlineDeliveries))
+            offlineCount = static_cast<int>(offlineDeliveries.size());
+        else
+            failedCount = static_cast<int>(offlineDeliveries.size());
+    }
+
+    const bool accepted = failedCount == 0;
+    json fields{{"group_id", groupId},
+                {"recipient_count", static_cast<int>(recipients.size())},
+                {"local_queued", localCount}, {"redis_published", remoteCount},
+                {"queued_offline", offlineCount}, {"failed", failedCount},
+                {"realtime_routed", offlineCount == 0 && failedCount == 0},
+                {"delivery_guaranteed", false}};
+    sendBusinessResponse(connection, GROUP_CHAT_MSG_ACK, requestId, accepted,
+                         accepted ? "" : "GROUP_DELIVERY_FAILED",
+                         accepted ? "" : "one or more group messages were not stored",
+                         std::move(fields));
+    LOG_INFO << "node=" << nodeId_ << " group-chat sender=" << session->userId
+             << " group=" << groupId << " local=" << localCount
+             << " redis=" << remoteCount << " offline=" << offlineCount
+             << " failed=" << failedCount;
 }
 
 void ChatService::aiChat(const muduo::net::TcpConnectionPtr &connection,
@@ -756,7 +1251,8 @@ void ChatService::handleRedisDelivery(const nexusim::ClusterDelivery &delivery)
         const auto messageId = payload.find("msgid");
         const auto recipient = payload.find("toid");
         if (messageId == payload.end() || !messageId->is_number_integer() ||
-            messageId->get<int>() != ONE_CHAT_MSG || recipient == payload.end() ||
+            (messageId->get<int>() != ONE_CHAT_MSG &&
+             messageId->get<int>() != GROUP_CHAT_MSG) || recipient == payload.end() ||
             !recipient->is_number_integer() || recipient->get<int>() != delivery.recipientId)
         {
             LOG_ERROR << "node=" << nodeId_ << " rejected invalid Redis chat payload";

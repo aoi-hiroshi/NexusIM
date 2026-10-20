@@ -1,6 +1,8 @@
 #include "db.h"
 #include <muduo/base/Logging.h>
 #include <cstdlib>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -17,6 +19,22 @@ string optionalEnvironment(const char *name, const char *fallback)
 }
 } // namespace
 
+MySQLParameter MySQLParameter::integer(std::int64_t value)
+{
+    MySQLParameter parameter;
+    parameter.kind = Kind::Integer;
+    parameter.integerValue = value;
+    return parameter;
+}
+
+MySQLParameter MySQLParameter::text(std::string value)
+{
+    MySQLParameter parameter;
+    parameter.kind = Kind::Text;
+    parameter.textValue = std::move(value);
+    return parameter;
+}
+
 // 初始化数据库连接
 MySQL::MySQL()
 {
@@ -26,6 +44,8 @@ MySQL::MySQL()
 // 释放数据库连接资源
 MySQL::~MySQL()
 {
+    for (MYSQL_STMT *statement : preparedQueryStatements_)
+        if (statement != nullptr) mysql_stmt_close(statement);
     if (_conn != nullptr)
         mysql_close(_conn);
 }
@@ -95,6 +115,120 @@ MYSQL_RES *MySQL::query(string sql)
     }
     
     return mysql_use_result(_conn);
+}
+
+namespace
+{
+bool bindParameters(MYSQL_STMT *statement,
+                    const std::vector<MySQLParameter> &parameters,
+                    std::vector<MYSQL_BIND> &bindings,
+                    std::vector<unsigned long> &lengths)
+{
+    if (mysql_stmt_param_count(statement) != parameters.size()) return false;
+    if (parameters.empty()) return true;
+
+    bindings.assign(parameters.size(), MYSQL_BIND{});
+    lengths.assign(parameters.size(), 0);
+    for (std::size_t index = 0; index < parameters.size(); ++index)
+    {
+        MYSQL_BIND &binding = bindings[index];
+        const MySQLParameter &parameter = parameters[index];
+        if (parameter.kind == MySQLParameter::Kind::Integer)
+        {
+            binding.buffer_type = MYSQL_TYPE_LONGLONG;
+            binding.buffer = const_cast<std::int64_t *>(&parameter.integerValue);
+            binding.is_unsigned = 0;
+        }
+        else
+        {
+            lengths[index] = static_cast<unsigned long>(parameter.textValue.size());
+            binding.buffer_type = MYSQL_TYPE_STRING;
+            binding.buffer = const_cast<char *>(parameter.textValue.data());
+            binding.buffer_length = lengths[index];
+            binding.length = &lengths[index];
+        }
+    }
+    return mysql_stmt_bind_param(statement, bindings.data()) == 0;
+}
+} // namespace
+
+MySQLExecuteResult MySQL::executePrepared(
+    const std::string &sql, const std::vector<MySQLParameter> &parameters)
+{
+    MySQLExecuteResult result;
+    MYSQL_STMT *statement = mysql_stmt_init(_conn);
+    if (statement == nullptr) return result;
+    if (mysql_stmt_prepare(statement, sql.data(),
+                           static_cast<unsigned long>(sql.size())) != 0)
+    {
+        LOG_ERROR << "mysql prepare failed: " << mysql_stmt_error(statement);
+        mysql_stmt_close(statement);
+        return result;
+    }
+    std::vector<MYSQL_BIND> bindings;
+    std::vector<unsigned long> lengths;
+    if (!bindParameters(statement, parameters, bindings, lengths) ||
+        mysql_stmt_execute(statement) != 0)
+    {
+        LOG_ERROR << "mysql prepared update failed: " << mysql_stmt_error(statement);
+        mysql_stmt_close(statement);
+        return result;
+    }
+    result.success = true;
+    result.affectedRows = static_cast<std::uint64_t>(mysql_stmt_affected_rows(statement));
+    result.insertId = static_cast<std::uint64_t>(mysql_stmt_insert_id(statement));
+    mysql_stmt_close(statement);
+    return result;
+}
+
+MYSQL_RES *MySQL::queryPrepared(
+    const std::string &sql, const std::vector<MySQLParameter> &parameters)
+{
+    MYSQL_STMT *statement = mysql_stmt_init(_conn);
+    if (statement == nullptr) return nullptr;
+    if (mysql_stmt_prepare(statement, sql.data(),
+                           static_cast<unsigned long>(sql.size())) != 0)
+    {
+        LOG_ERROR << "mysql prepare failed: " << mysql_stmt_error(statement);
+        mysql_stmt_close(statement);
+        return nullptr;
+    }
+    std::vector<MYSQL_BIND> bindings;
+    std::vector<unsigned long> lengths;
+    if (!bindParameters(statement, parameters, bindings, lengths) ||
+        mysql_stmt_execute(statement) != 0)
+    {
+        LOG_ERROR << "mysql prepared query failed: " << mysql_stmt_error(statement);
+        mysql_stmt_close(statement);
+        return nullptr;
+    }
+    MYSQL_RES *result = mysql_stmt_get_result(statement);
+    if (result == nullptr && mysql_stmt_field_count(statement) != 0)
+    {
+        LOG_ERROR << "mysql get prepared result failed: " << mysql_stmt_error(statement);
+        mysql_stmt_close(statement);
+        return nullptr;
+    }
+    preparedQueryStatements_.push_back(statement);
+    return result;
+}
+
+bool MySQL::beginTransaction()
+{
+    return mysql_autocommit(_conn, 0) == 0;
+}
+
+bool MySQL::commit()
+{
+    const bool committed = mysql_commit(_conn) == 0;
+    mysql_autocommit(_conn, 1);
+    return committed;
+}
+
+void MySQL::rollback() noexcept
+{
+    mysql_rollback(_conn);
+    mysql_autocommit(_conn, 1);
 }
 
 string MySQL::escape(const string &value)

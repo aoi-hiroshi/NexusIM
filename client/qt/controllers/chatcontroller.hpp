@@ -30,6 +30,9 @@ public:
     bool sendMessage(int recipientId, const QString &displayName,
                      const QString &text);
 
+public slots:
+    void setContacts(const QJsonArray &contacts);
+
 signals:
     void activeConversationChanged(int userId);
     void contactsAvailable(const QJsonArray &contacts);

@@ -5,6 +5,7 @@
 #include "server/concurrency/boundedexecutor.hpp"
 #include "server/concurrency/pendingrequest.hpp"
 #include "server/model/friendmodel.hpp"
+#include "server/model/groupmodel.hpp"
 #include "server/model/offlinemessagemodel.hpp"
 #include "server/redis/redis.hpp"
 #include "server/rpc/aiserviceclient.hpp"
@@ -56,6 +57,14 @@ private:
     void login(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
     void reg(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
     void oneChat(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
+    void addFriend(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
+    void queryFriends(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
+    void createGroup(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
+    void addGroup(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
+    void queryGroups(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
+    void queryGroupMembers(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
+    void leaveGroup(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
+    void groupChat(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
     void loginout(const muduo::net::TcpConnectionPtr &, json &, muduo::Timestamp);
     bool bindAuthenticated(const muduo::net::TcpConnectionPtr &, int userId,
                            const std::string &userName, const std::string &sessionId);
@@ -95,6 +104,7 @@ private:
 
     OfflineMsgModel offlineMessageModel_;
     FriendModel friendModel_;
+    GroupModel groupModel_;
     nexusim::UserServiceClient userServiceClient_;
     nexusim::AIServiceClient aiServiceClient_;
     nexusim::PendingRequestRegistry rpcRequests_;

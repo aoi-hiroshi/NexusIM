@@ -18,6 +18,7 @@ from auth_probe import (
 
 ONE_CHAT_MSG = 6
 ADD_FRIEND_MSG = 7
+ADD_FRIEND_MSG_ACK = 16
 HEARTBEAT_MSG = 11
 HEARTBEAT_MSG_ACK = 12
 ERROR_MSG = 13
@@ -56,18 +57,24 @@ def run(host: str, port: int, timeout: float) -> None:
     sender_name = f"security_sender_{suffix}"
     receiver_name = f"security_receiver_{suffix}"
 
-    # Heartbeats cannot authenticate a connection, and disabled legacy handlers
-    # remain unreachable even when a client knows their numeric message IDs.
+    # Heartbeats and the Stage 6 social handlers cannot authenticate a connection.
     with socket.create_connection((host, port), timeout=timeout) as unauthenticated:
         unauthenticated.settimeout(timeout)
         expect_error(unauthenticated, {
             "msgid": HEARTBEAT_MSG,
             "request_id": "unauthenticated-heartbeat",
         }, "UNAUTHENTICATED")
-        expect_error(unauthenticated, {
+        send_json(unauthenticated, {
             "msgid": ADD_FRIEND_MSG,
+            "request_id": "unauthenticated-friend",
             "friendid": 1,
-        }, "FEATURE_DISABLED")
+        })
+        friend_response = receive_json(unauthenticated)
+        if friend_response.get("msgid") != ADD_FRIEND_MSG_ACK or \
+                friend_response.get("error") != "UNAUTHENTICATED":
+            raise RuntimeError(
+                f"unauthenticated friend request was not rejected: {friend_response}"
+            )
 
     with socket.create_connection((host, port), timeout=timeout) as receiver, \
             socket.create_connection((host, port), timeout=timeout) as sender:

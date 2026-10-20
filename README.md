@@ -7,8 +7,9 @@ NexusIM 是基于施磊课程 ChatServer 与 MPRPC 示例代码演进的 C++17 �
 Protobuf/Muduo/ZooKeeper/MySQL 真实构建、RPC/故障注入及 Stage 1/2 最终回归。
 Stage 4 已新增 Qt 5.12.8 桌面客户端，用户已在测试 PC 完成双端联调。
 Stage 5 已新增独立 AIService、DeepSeek V4 Pro HTTPS 适配、ChatServer AI RPC
-隔离执行器与 Qt AI 对话页；Windows 构建与本地核心测试见对应报告，Linux
-编译和真实 DeepSeek API 仍需在测试虚拟机验收。
+隔离执行器与 Qt AI 对话页，并已完成用户提供的 Linux/真实 API 回归。
+Stage 6 已实现双向好友、群组管理、双节点分布式群聊、离线群消息和 Qt 社交页面；
+Windows 构建与单元测试通过，Linux 双节点业务验收待测试机执行。
 
 ## 当前目录
 
@@ -31,12 +32,15 @@ Stage 5 已新增独立 AIService、DeepSeek V4 Pro HTTPS 适配、ChatServer AI
 - `docs/stage5-implementation.md`：AI RPC、线程、生命周期、安全和 Qt 交互设计。
 - `docs/stage5-linux-testing.md`：Ubuntu 构建、启动、Mock/真实 API 与双客户端验收命令。
 - `docs/stage5-test-report.md`：Stage 5 实际 Windows 测试与 Linux 待验证边界。
+- `docs/stage6-implementation.md`：好友、群组、Redis 群聊、SQL 与 Qt 设计。
+- `docs/stage6-linux-testing.md`：Stage 6 Linux 数据迁移、构建、启动和验收命令。
+- `docs/stage6-test-report.md`：Stage 6 Windows 真实结果与 Linux 待验证清单。
 - `docs/v1-test-report.md`：当前 V1 测试结论、真实证据、未完成项和发布判定。
 - `deploy/`：双实例环境模板、Redis 模板、Nginx stream 配置与启动脚本。
 
 ## V1 边界
 
-V1 已实现 TCP/RPC 分帧、RPC 超时、EventLoop 非阻塞、连接身份校验、安全数据库访问、双 ChatServer + Redis + Nginx、独立 UserService、Qt 5.12.8 客户端以及基础 AIService。
+V1 已实现 TCP/RPC 分帧、RPC 超时、EventLoop 非阻塞、连接身份校验、安全数据库访问、双 ChatServer + Redis + Nginx、独立 UserService、Qt 5.12.8 客户端、基础 AIService，以及好友、群组与分布式群聊。
 
 V1 不承诺 ACK 可靠投递、多设备同步、复杂历史、RPC 多实例治理、流式 AI、RAG 或 MCP。
 

@@ -8,6 +8,7 @@
 #include <QMainWindow>
 
 class QLabel;
+class QLineEdit;
 class QListWidget;
 class QPushButton;
 class QStackedWidget;
@@ -20,12 +21,15 @@ class AIController;
 class AIChatWidget;
 class ChatWidget;
 class ConversationList;
+class GroupChatWidget;
+class SocialController;
 
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 public:
-    MainWindow(ChatController *chat, AIController *ai, NetworkClient *network,
+    MainWindow(ChatController *chat, SocialController *social,
+               AIController *ai, NetworkClient *network,
                QWidget *parent = nullptr);
 
     void setSession(const UserSession &session, const ServerEndpoint &endpoint);
@@ -38,6 +42,8 @@ signals:
 
 public slots:
     void showContacts(const QJsonArray &contacts);
+    void showGroups(const QJsonArray &groups);
+    void showGroupUnread(int groupId, int count);
     void showChatError(const QString &message);
     void updateNetworkState(NetworkClient::State state);
 
@@ -49,6 +55,7 @@ private slots:
     void startConversation(int userId);
     void selectConversation(int userId, const QString &displayName);
     void openContactConversation();
+    void openGroupConversation();
     void openSettings();
 
 private:
@@ -57,6 +64,7 @@ private:
     void activateNav(QPushButton *button);
 
     ChatController *chat_;
+    SocialController *social_;
     AIController *ai_;
     NetworkClient *network_;
     ServerEndpoint endpoint_;
@@ -68,7 +76,10 @@ private:
     ConversationList *conversationList_;
     ChatWidget *chatWidget_;
     AIChatWidget *aiChatWidget_;
+    GroupChatWidget *groupChatWidget_;
     QListWidget *contactList_;
+    QListWidget *groupList_;
+    QLineEdit *contactSearch_;
     QPushButton *messagesButton_;
     QPushButton *contactsButton_;
     QPushButton *groupsButton_;

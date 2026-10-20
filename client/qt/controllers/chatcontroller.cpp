@@ -127,6 +127,19 @@ bool ChatController::sendMessage(int recipientId, const QString &displayName,
     return true;
 }
 
+void ChatController::setContacts(const QJsonArray &contacts)
+{
+    for (const QJsonValue &value : contacts)
+    {
+        const QJsonObject contact = value.toObject();
+        const int id = contact.value(QStringLiteral("id")).toInt(-1);
+        if (id <= 0) continue;
+        const QString name = contact.value(QStringLiteral("name")).toString();
+        if (!name.isEmpty()) knownNames_[id] = name;
+    }
+    emit contactsAvailable(contacts);
+}
+
 void ChatController::onMessage(const QJsonObject &message)
 {
     const int type = message.value(QStringLiteral("msgid")).toInt(-1);

@@ -10,6 +10,7 @@ add_nexusim_qt_test(qt_protocol_tests test_protocol.cpp)
 add_nexusim_qt_test(qt_requestmanager_tests test_requestmanager.cpp)
 add_nexusim_qt_test(qt_networkclient_tests test_networkclient.cpp)
 add_nexusim_qt_test(qt_aicontroller_tests test_aicontroller.cpp)
+add_nexusim_qt_test(qt_socialcontroller_tests test_socialcontroller.cpp)
 
 add_executable(qt_aichatwidget_tests
     test_aichatwidget.cpp
@@ -18,3 +19,16 @@ target_link_libraries(qt_aichatwidget_tests PRIVATE
     nexusim_qt_core Qt5::Test Qt5::Network Qt5::Widgets)
 add_test(NAME qt_aichatwidget_tests COMMAND qt_aichatwidget_tests)
 set_tests_properties(qt_aichatwidget_tests PROPERTIES TIMEOUT 15)
+
+add_executable(qt_socialui_tests
+    test_socialui.cpp
+    ../ui/mainwindow.cpp
+    ../ui/chatwidget.cpp
+    ../ui/aichatwidget.cpp
+    ../ui/groupchatwidget.cpp
+    ../ui/conversationlist.cpp
+    ../ui/settingsdialog.cpp)
+target_link_libraries(qt_socialui_tests PRIVATE
+    nexusim_qt_core Qt5::Test Qt5::Network Qt5::Widgets)
+add_test(NAME qt_socialui_tests COMMAND qt_socialui_tests)
+set_tests_properties(qt_socialui_tests PROPERTIES TIMEOUT 15)

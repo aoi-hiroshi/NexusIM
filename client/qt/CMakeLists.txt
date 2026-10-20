@@ -25,6 +25,7 @@ add_library(nexusim_qt_core STATIC
     controllers/sessioncontroller.cpp
     controllers/authcontroller.cpp
     controllers/chatcontroller.cpp
+    controllers/socialcontroller.cpp
     controllers/aicontroller.cpp)
 
 target_include_directories(nexusim_qt_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -44,6 +45,7 @@ add_executable(NexusIMClient WIN32
     ui/mainwindow.cpp
     ui/chatwidget.cpp
     ui/aichatwidget.cpp
+    ui/groupchatwidget.cpp
     ui/conversationlist.cpp
     resources/resources.qrc)
 

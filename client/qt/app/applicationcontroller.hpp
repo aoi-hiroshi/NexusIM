@@ -16,6 +16,7 @@ class LoginWindow;
 class MainWindow;
 class RequestManager;
 class SessionController;
+class SocialController;
 
 class ApplicationController : public QObject
 {
@@ -39,6 +40,7 @@ private:
     std::unique_ptr<SessionController> session_;
     std::unique_ptr<AuthController> auth_;
     std::unique_ptr<ChatController> chat_;
+    std::unique_ptr<SocialController> social_;
     std::unique_ptr<AIController> ai_;
     std::unique_ptr<LoginWindow> loginWindow_;
     std::unique_ptr<MainWindow> mainWindow_;

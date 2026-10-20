@@ -3,6 +3,7 @@
 #include "controllers/authcontroller.hpp"
 #include "controllers/aicontroller.hpp"
 #include "controllers/chatcontroller.hpp"
+#include "controllers/socialcontroller.hpp"
 #include "controllers/sessioncontroller.hpp"
 #include "network/requestmanager.hpp"
 #include "ui/loginwindow.hpp"
@@ -19,9 +20,10 @@ ApplicationController::ApplicationController(const ServerEndpoint &initialEndpoi
       session_(new SessionController(this)),
       auth_(new AuthController(&network_, requests_.get(), session_.get(), this)),
       chat_(new ChatController(&network_, requests_.get(), session_.get(), this)),
+      social_(new SocialController(&network_, requests_.get(), session_.get(), this)),
       ai_(new AIController(&network_, requests_.get(), session_.get(), 90000, this)),
       loginWindow_(new LoginWindow(auth_.get(), &network_, initialEndpoint)),
-      mainWindow_(new MainWindow(chat_.get(), ai_.get(), &network_))
+      mainWindow_(new MainWindow(chat_.get(), social_.get(), ai_.get(), &network_))
 {
     connect(&network_, &NetworkClient::messageReceived,
             requests_.get(), &RequestManager::handleMessage);
@@ -39,6 +41,16 @@ ApplicationController::ApplicationController(const ServerEndpoint &initialEndpoi
             this, &ApplicationController::changeEndpoint);
     connect(chat_.get(), &ChatController::contactsAvailable,
             mainWindow_.get(), &MainWindow::showContacts);
+    connect(social_.get(), &SocialController::friendsChanged,
+            chat_.get(), &ChatController::setContacts);
+    connect(social_.get(), &SocialController::groupsChanged,
+            mainWindow_.get(), &MainWindow::showGroups);
+    connect(social_.get(), &SocialController::groupUnreadChanged,
+            mainWindow_.get(), &MainWindow::showGroupUnread);
+    connect(social_.get(), &SocialController::operationSucceeded,
+            mainWindow_.get(), &MainWindow::showChatError);
+    connect(social_.get(), &SocialController::operationFailed,
+            mainWindow_.get(), &MainWindow::showChatError);
     connect(chat_.get(), &ChatController::chatError,
             mainWindow_.get(), &MainWindow::showChatError);
     connect(chat_.get(), &ChatController::connectionProblem,
@@ -55,6 +67,7 @@ void ApplicationController::start()
 void ApplicationController::onLoginSucceeded(const QJsonObject &response)
 {
     chat_->startSession(response);
+    social_->startSession(response);
     ai_->startSession();
     mainWindow_->setSession(session_->session(), loginWindow_->endpoint());
     loginWindow_->hide();
@@ -66,6 +79,7 @@ void ApplicationController::onLoginSucceeded(const QJsonObject &response)
 void ApplicationController::onLoggedOut()
 {
     chat_->stopSession();
+    social_->stopSession();
     ai_->stopSession();
     mainWindow_->reset();
     mainWindow_->hide();
@@ -77,6 +91,7 @@ void ApplicationController::onDisconnected()
     requests_->cancelAll(QStringLiteral("连接已断开"));
     if (!session_->isAuthenticated()) return;
     chat_->stopSession();
+    social_->stopSession();
     ai_->stopSession();
     session_->clear();
     mainWindow_->reset();
