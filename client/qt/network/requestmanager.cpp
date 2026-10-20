@@ -13,8 +13,14 @@ quint64 RequestManager::startRequest(int requestMsgId, int responseMsgId,
 {
     for (auto it = pending_.constBegin(); it != pending_.constEnd(); ++it)
     {
-        if (it->requestMsgId == requestMsgId ||
-            it->responseMsgId == responseMsgId)
+        if (it->requestMsgId != requestMsgId &&
+            it->responseMsgId != responseMsgId)
+            continue;
+        // Legacy Login/Register requests have no correlation id and therefore
+        // remain strictly single-flight. Correlated AI/heartbeat requests can
+        // safely coexist as long as their ids are distinct.
+        if (correlationId.isEmpty() || it->correlationId.isEmpty() ||
+            it->correlationId == correlationId)
             return 0;
     }
     const quint64 token = nextToken_++;
@@ -57,7 +63,9 @@ void RequestManager::handleMessage(const QJsonObject &message)
     if (msgid == protocol::Error)
     {
         const int requestId = message.value(QStringLiteral("request_msgid")).toInt(-1);
-        token = matchingToken(requestId, -1, QString());
+        const QString correlation = message.value(
+            QStringLiteral("request_id")).toString();
+        token = matchingToken(requestId, -1, correlation);
         if (!token) return;
         take(token);
         emit requestFailed(token, protocol::responseErrorText(message), message);

@@ -28,7 +28,8 @@ target_link_libraries(ChatServer
     Threads::Threads
     OpenSSL::Crypto
     mprpc
-    nexusim_user_proto)
+    nexusim_user_proto
+    nexusim_ai_proto)
 
 # Allows a Linux staging directory to receive the single configurable binary;
 # node identity and listen port are supplied by each instance's environment.

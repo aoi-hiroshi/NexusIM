@@ -24,7 +24,9 @@ enum MessageType
     GroupChat = 10,
     Heartbeat = 11,
     HeartbeatAck = 12,
-    Error = 13
+    Error = 13,
+    AIChat = 14,
+    AIChatAck = 15
 };
 
 QJsonObject loginRequest(int userId, const QString &password);
@@ -33,6 +35,9 @@ QJsonObject logoutRequest();
 QJsonObject directChatRequest(int recipientId, const QString &message,
                               const QString &timeText);
 QJsonObject heartbeatRequest(const QString &requestId);
+QJsonObject aiChatRequest(const QString &requestId,
+                          const QString &conversationId,
+                          const QString &prompt);
 QString responseErrorText(const QJsonObject &object);
 QVector<QJsonObject> decodeObjectStrings(const QJsonValue &value);
 

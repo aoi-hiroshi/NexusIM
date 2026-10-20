@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package nexusim.ai;
+
+option cc_generic_services = true;
+
+enum AIStatusCode {
+  AI_STATUS_OK = 0;
+  AI_STATUS_INVALID_ARGUMENT = 1;
+  AI_STATUS_BUSY = 2;
+  AI_STATUS_CONFIG_MISSING = 3;
+  AI_STATUS_AUTH_FAILED = 4;
+  AI_STATUS_RATE_LIMITED = 5;
+  AI_STATUS_UPSTREAM_TIMEOUT = 6;
+  AI_STATUS_UPSTREAM_ERROR = 7;
+  AI_STATUS_INVALID_RESPONSE = 8;
+  AI_STATUS_REQUEST_CANCELLED = 9;
+}
+
+message AIChatRequest {
+  string request_id = 1;
+  int32 user_id = 2;
+  string conversation_id = 3;
+  string prompt = 4;
+  int32 deadline_ms = 5;
+}
+
+message AITokenUsage {
+  int64 prompt_tokens = 1;
+  int64 completion_tokens = 2;
+  int64 total_tokens = 3;
+}
+
+message AIChatResponse {
+  string request_id = 1;
+  string conversation_id = 2;
+  string content = 3;
+  string model = 4;
+  AIStatusCode status_code = 5;
+  string error_message = 6;
+  string finish_reason = 7;
+  int32 http_status = 8;
+  string upstream_request_id = 9;
+  AITokenUsage usage = 10;
+}
+
+service AIService {
+  rpc Chat(AIChatRequest) returns (AIChatResponse);
+}

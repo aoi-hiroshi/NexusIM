@@ -13,7 +13,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setOrganizationName(QStringLiteral("NexusIM"));
     QApplication::setApplicationName(QStringLiteral("NexusIMClient"));
-    QApplication::setApplicationVersion(QStringLiteral("0.4.0"));
+    QApplication::setApplicationVersion(QStringLiteral("0.5.0"));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("NexusIM Qt5 desktop client"));

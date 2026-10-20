@@ -7,6 +7,7 @@
 #include "server/model/friendmodel.hpp"
 #include "server/model/offlinemessagemodel.hpp"
 #include "server/redis/redis.hpp"
+#include "server/rpc/aiserviceclient.hpp"
 #include "server/rpc/userserviceclient.hpp"
 #include "server/sessioncontext.hpp"
 
@@ -43,6 +44,11 @@ public:
     bool invalidateSession(const nexusim::SessionContext &session);
     bool renewPresence(const nexusim::SessionContext &session);
     const std::string &nodeId() const noexcept;
+    void aiChat(const muduo::net::TcpConnectionPtr &, json &,
+                muduo::Timestamp);
+    void sendAiError(const muduo::net::TcpConnectionPtr &,
+                     const json &request, const std::string &code,
+                     const std::string &message) const;
 
 private:
     ChatService();
@@ -64,6 +70,11 @@ private:
                             const nexusim::SessionContext &session,
                             bool allowExpired = false);
     std::chrono::milliseconds rpcTimeout() const;
+    std::chrono::milliseconds aiRpcTimeout() const;
+    std::string beginAiRpcRequest(
+        const nexusim::SessionContext &session,
+        const std::string &clientRequestId,
+        nexusim::PendingRequestRegistry::Clock::time_point deadline);
     muduo::net::TcpConnectionPtr localConnectionForUser(
         int userId, const std::string *expectedSessionId = nullptr) const;
     void enqueueRedisDelivery(nexusim::ClusterDelivery delivery);
@@ -85,6 +96,7 @@ private:
     OfflineMsgModel offlineMessageModel_;
     FriendModel friendModel_;
     nexusim::UserServiceClient userServiceClient_;
+    nexusim::AIServiceClient aiServiceClient_;
     nexusim::PendingRequestRegistry rpcRequests_;
     std::atomic<std::uint64_t> nextRpcRequestId_{1};
     std::string nodeId_;

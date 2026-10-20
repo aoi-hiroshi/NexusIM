@@ -40,6 +40,16 @@ QJsonObject heartbeatRequest(const QString &requestId)
             {QStringLiteral("request_id"), requestId}};
 }
 
+QJsonObject aiChatRequest(const QString &requestId,
+                          const QString &conversationId,
+                          const QString &prompt)
+{
+    return {{QStringLiteral("msgid"), AIChat},
+            {QStringLiteral("request_id"), requestId},
+            {QStringLiteral("conversation_id"), conversationId},
+            {QStringLiteral("prompt"), prompt}};
+}
+
 QString responseErrorText(const QJsonObject &object)
 {
     const QString message = object.value(QStringLiteral("errmsg")).toString();

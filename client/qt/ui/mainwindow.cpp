@@ -1,6 +1,8 @@
 #include "ui/mainwindow.hpp"
 
 #include "controllers/chatcontroller.hpp"
+#include "controllers/aicontroller.hpp"
+#include "ui/aichatwidget.hpp"
 #include "ui/chatwidget.hpp"
 #include "ui/conversationlist.hpp"
 #include "ui/settingsdialog.hpp"
@@ -18,14 +20,16 @@
 namespace nexusim {
 namespace client {
 
-MainWindow::MainWindow(ChatController *chat, NetworkClient *network,
+MainWindow::MainWindow(ChatController *chat, AIController *ai,
+                       NetworkClient *network,
                        QWidget *parent)
-    : QMainWindow(parent), chat_(chat), network_(network),
+    : QMainWindow(parent), chat_(chat), ai_(ai), network_(network),
       avatarLabel_(new QLabel(QStringLiteral("N"), this)),
       connectionLabel_(new QLabel(QStringLiteral("未连接"), this)),
       middleStack_(new QStackedWidget(this)), rightStack_(new QStackedWidget(this)),
       conversationList_(new ConversationList(chat_->conversations(), this)),
       chatWidget_(new ChatWidget(chat_, chat_->conversations(), this)),
+      aiChatWidget_(new AIChatWidget(ai_, this)),
       contactList_(new QListWidget(this))
 {
     setWindowTitle(QStringLiteral("NexusIM"));
@@ -82,7 +86,7 @@ MainWindow::MainWindow(ChatController *chat, NetworkClient *network,
         QStringLiteral("服务端群组 Handler 尚未通过安全审计，Stage 4 不会擅自启用。")));
     middleStack_->addWidget(makeUnavailablePage(
         QStringLiteral("AI 助手"),
-        QStringLiteral("界面入口已预留，真实 AIService 与 LLM API 将在 Stage 5 接入。")));
+        QStringLiteral("DeepSeek V4 Pro 由独立 AIService 调用；对话上下文在服务重启后丢失。")));
 
     rightStack_->addWidget(chatWidget_);
     rightStack_->addWidget(makeUnavailablePage(
@@ -90,9 +94,7 @@ MainWindow::MainWindow(ChatController *chat, NetworkClient *network,
     rightStack_->addWidget(makeUnavailablePage(
         QStringLiteral("群组暂未开放"),
         QStringLiteral("当前客户端不会发送 CREATE_GROUP、ADD_GROUP 或 GROUP_CHAT 请求。")));
-    rightStack_->addWidget(makeUnavailablePage(
-        QStringLiteral("AI 助手即将开放"),
-        QStringLiteral("本页面没有模拟回复，也不会把普通单聊伪装成模型对话。")));
+    rightStack_->addWidget(aiChatWidget_);
 
     auto *central = new QWidget(this);
     auto *layout = new QHBoxLayout(central);
@@ -149,6 +151,7 @@ void MainWindow::reset()
     session_ = UserSession();
     contactList_->clear();
     chatWidget_->clearConversation();
+    aiChatWidget_->reset();
     avatarLabel_->setText(QStringLiteral("N"));
     setWindowTitle(QStringLiteral("NexusIM"));
 }

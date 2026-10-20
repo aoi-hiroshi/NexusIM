@@ -5,6 +5,11 @@ link Muduo, MySQL, Redis, ZooKeeper, or MPRPC. It communicates with an existing
 ChatServer or Nginx Stream endpoint using the Stage 1 wire format: a four-byte
 big-endian length followed by one UTF-8 JSON object.
 
+Stage 5 adds a non-blocking DeepSeek AI page. The Windows client still talks
+only to ChatServer; API credentials and HTTPS model calls stay in the Linux
+AIService. AI requests use correlated message IDs 14/15 and a 90-second UI
+timeout.
+
 ## Configure and build
 
 Run from the repository root in a VS2019 x64 developer shell:
@@ -44,5 +49,6 @@ Use port 6001 or 6002 for deterministic node testing, and port 8000 for the
 Nginx Stream entry. Settings can also be changed in the login window. Running
 the executable twice is supported; no single-instance lock is used.
 
-See `docs/stage4-protocol-matrix.md` and `docs/stage4-qt-client.md` for protocol,
-feature, test, and reliability details.
+See `docs/stage4-protocol-matrix.md`, `docs/stage4-qt-client.md`, and
+`docs/stage5-implementation.md` for protocol, feature, test, and reliability
+details.

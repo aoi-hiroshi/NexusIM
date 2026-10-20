@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/../.." && pwd)"
+runtime_dir="${1:-${repo_root}/run/ai-service}"
+pid_file="${runtime_dir}/pids/ai-service.pid"
+
+if [[ ! -f "${pid_file}" ]]; then
+    echo "AIService is not running (no pid file)"
+    exit 0
+fi
+pid="$(<"${pid_file}")"
+if [[ "${pid}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+    kill "${pid}"
+    for _ in {1..100}; do
+        if ! kill -0 "${pid}" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    if kill -0 "${pid}" 2>/dev/null; then
+        echo "AIService PID ${pid} did not exit after SIGTERM; PID file retained" >&2
+        exit 1
+    fi
+fi
+rm -f -- "${pid_file}"
+echo "stopped AIService"

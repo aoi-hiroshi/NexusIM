@@ -33,7 +33,7 @@ require(chat, "heartbeatTimer_.setInterval(30000)", "presence heartbeat")
 require(auth, "pendingPassword_.clear()", "credential lifetime cleanup")
 require(auth, "late\n    // response cannot be mistaken", "legacy auth stale-response isolation")
 require(main_window, "群组暂未开放", "disabled server feature disclosure")
-require(main_window, "Stage 5", "AI placeholder disclosure")
+require(main_window, "DeepSeek V4 Pro", "AI service disclosure")
 require(server_ids, "HEARTBEAT_MSG", "server protocol compatibility")
 
 client_sources = "\n".join(

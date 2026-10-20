@@ -27,6 +27,16 @@ private slots:
         QCOMPARE(chat.value("toid").toInt(), 9);
         QVERIFY(!chat.contains("id"));
         QVERIFY(!chat.contains("session_id"));
+
+        const QJsonObject ai = protocol::aiChatRequest(
+            QStringLiteral("req-1"), QStringLiteral("conversation-1"),
+            QStringLiteral("请用中文回答"));
+        QCOMPARE(ai.value("msgid").toInt(), 14);
+        QCOMPARE(ai.value("request_id").toString(), QStringLiteral("req-1"));
+        QCOMPARE(ai.value("conversation_id").toString(),
+                 QStringLiteral("conversation-1"));
+        QVERIFY(!ai.contains("user_id"));
+        QVERIFY(!ai.contains("session_id"));
     }
 
     void decodesLegacyStringArrays()
@@ -50,6 +60,12 @@ private slots:
                         {"errmsg", "message type is not enabled"}});
         QVERIFY(text.contains(QStringLiteral("FEATURE_DISABLED")));
         QVERIFY(text.contains(QStringLiteral("message type")));
+    }
+
+    void aiMessageIdsRemainCompatible()
+    {
+        QCOMPARE(static_cast<int>(protocol::AIChat), 14);
+        QCOMPARE(static_cast<int>(protocol::AIChatAck), 15);
     }
 };
 

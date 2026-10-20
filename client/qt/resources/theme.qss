@@ -68,6 +68,14 @@ QLabel#navAvatar {
     font-size: 17px;
     font-weight: 700;
 }
+QLabel#aiAvatar {
+    background: #171f32;
+    color: #79c4ff;
+    border: 1px solid #46678f;
+    border-radius: 21px;
+    font-weight: 700;
+}
+QLabel#aiWaitingLabel { color: #3978f6; font-size: 12px; padding-left: 3px; }
 QPushButton#navButton {
     background: transparent;
     color: #aeb8ca;
@@ -106,6 +114,14 @@ QFrame#messageBubble[outgoing="true"] {
 QFrame#messageBubble[system="true"] {
     background: #eef1f5;
     border: none;
+}
+QFrame#messageBubble[assistant="true"] {
+    background: #ffffff;
+    border-color: #ccd9ea;
+}
+QFrame#messageBubble[error="true"] {
+    background: #fff0f2;
+    border-color: #f3c7ce;
 }
 QLabel#messageMeta { color: #8790a0; font-size: 10px; }
 QStatusBar { background: white; border-top: 1px solid #e8ecf2; }

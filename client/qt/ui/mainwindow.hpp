@@ -16,6 +16,8 @@ namespace nexusim {
 namespace client {
 
 class ChatController;
+class AIController;
+class AIChatWidget;
 class ChatWidget;
 class ConversationList;
 
@@ -23,7 +25,7 @@ class MainWindow : public QMainWindow
 {
     Q_OBJECT
 public:
-    MainWindow(ChatController *chat, NetworkClient *network,
+    MainWindow(ChatController *chat, AIController *ai, NetworkClient *network,
                QWidget *parent = nullptr);
 
     void setSession(const UserSession &session, const ServerEndpoint &endpoint);
@@ -55,6 +57,7 @@ private:
     void activateNav(QPushButton *button);
 
     ChatController *chat_;
+    AIController *ai_;
     NetworkClient *network_;
     ServerEndpoint endpoint_;
     UserSession session_;
@@ -64,6 +67,7 @@ private:
     QStackedWidget *rightStack_;
     ConversationList *conversationList_;
     ChatWidget *chatWidget_;
+    AIChatWidget *aiChatWidget_;
     QListWidget *contactList_;
     QPushButton *messagesButton_;
     QPushButton *contactsButton_;

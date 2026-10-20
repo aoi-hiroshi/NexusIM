@@ -1,6 +1,7 @@
 #include "app/applicationcontroller.hpp"
 
 #include "controllers/authcontroller.hpp"
+#include "controllers/aicontroller.hpp"
 #include "controllers/chatcontroller.hpp"
 #include "controllers/sessioncontroller.hpp"
 #include "network/requestmanager.hpp"
@@ -18,8 +19,9 @@ ApplicationController::ApplicationController(const ServerEndpoint &initialEndpoi
       session_(new SessionController(this)),
       auth_(new AuthController(&network_, requests_.get(), session_.get(), this)),
       chat_(new ChatController(&network_, requests_.get(), session_.get(), this)),
+      ai_(new AIController(&network_, requests_.get(), session_.get(), 90000, this)),
       loginWindow_(new LoginWindow(auth_.get(), &network_, initialEndpoint)),
-      mainWindow_(new MainWindow(chat_.get(), &network_))
+      mainWindow_(new MainWindow(chat_.get(), ai_.get(), &network_))
 {
     connect(&network_, &NetworkClient::messageReceived,
             requests_.get(), &RequestManager::handleMessage);
@@ -53,6 +55,7 @@ void ApplicationController::start()
 void ApplicationController::onLoginSucceeded(const QJsonObject &response)
 {
     chat_->startSession(response);
+    ai_->startSession();
     mainWindow_->setSession(session_->session(), loginWindow_->endpoint());
     loginWindow_->hide();
     mainWindow_->show();
@@ -63,6 +66,7 @@ void ApplicationController::onLoginSucceeded(const QJsonObject &response)
 void ApplicationController::onLoggedOut()
 {
     chat_->stopSession();
+    ai_->stopSession();
     mainWindow_->reset();
     mainWindow_->hide();
     loginWindow_->showDisconnectedMessage(QStringLiteral("已安全退出登录"));
@@ -73,6 +77,7 @@ void ApplicationController::onDisconnected()
     requests_->cancelAll(QStringLiteral("连接已断开"));
     if (!session_->isAuthenticated()) return;
     chat_->stopSession();
+    ai_->stopSession();
     session_->clear();
     mainWindow_->reset();
     mainWindow_->hide();

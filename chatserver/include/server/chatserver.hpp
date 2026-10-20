@@ -32,6 +32,9 @@ private:
                        std::string frame, muduo::Timestamp timestamp);
     void dispatchHeartbeat(const muduo::net::TcpConnectionPtr &connection,
                            const nlohmann::json &request);
+    void dispatchAiChat(const muduo::net::TcpConnectionPtr &connection,
+                        nlohmann::json request,
+                        muduo::Timestamp timestamp);
     void sendProtocolError(const muduo::net::TcpConnectionPtr &connection,
                            const std::string &code, const std::string &message);
 
@@ -41,6 +44,7 @@ private:
     nexusim::FrameCodec codec_;
     nexusim::ConnectionStrand businessStrand_;
     nexusim::BoundedExecutor presenceExecutor_;
+    nexusim::BoundedExecutor aiExecutor_;
     nexusim::PendingRequestRegistry pendingRequests_;
     std::atomic<std::uint64_t> nextRequestId_;
 };

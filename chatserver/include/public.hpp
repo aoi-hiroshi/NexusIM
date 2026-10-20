@@ -20,6 +20,8 @@ enum EnMsgType
     HEARTBEAT_MSG, // 独立心跳/Presence续租
     HEARTBEAT_MSG_ACK,
     ERROR_MSG,
+    AI_CHAT_MSG,
+    AI_CHAT_MSG_ACK,
 };
 
 #endif

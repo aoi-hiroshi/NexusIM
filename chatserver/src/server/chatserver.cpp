@@ -8,10 +8,32 @@
 #include <muduo/base/Logging.h>
 
 #include <chrono>
+#include <cstdlib>
+#include <limits>
 #include <memory>
+#include <string>
 #include <utility>
 
 using json = nlohmann::json;
+
+namespace
+{
+std::size_t positiveEnvironmentSize(const char *name, std::size_t fallback,
+                                    std::size_t maximum)
+{
+    const char *value = std::getenv(name);
+    if (value == nullptr) return fallback;
+    try
+    {
+        const auto parsed = static_cast<std::size_t>(std::stoull(value));
+        return parsed == 0 || parsed > maximum ? fallback : parsed;
+    }
+    catch (...)
+    {
+        return fallback;
+    }
+}
+} // namespace
 
 ChatServer::ChatServer(muduo::net::EventLoop *loop,
                        const muduo::net::InetAddress &listenAddress,
@@ -19,7 +41,11 @@ ChatServer::ChatServer(muduo::net::EventLoop *loop,
     : server_(loop, listenAddress, name), loop_(loop),
       service_(ChatService::instance()), codec_(),
       businessStrand_(4, 1024, 64),
-      presenceExecutor_("presence", 2, 512), nextRequestId_(1)
+      presenceExecutor_("presence", 2, 512),
+      aiExecutor_("ai-rpc",
+                  positiveEnvironmentSize("CHAT_AI_EXECUTOR_THREADS", 4, 64),
+                  positiveEnvironmentSize("CHAT_AI_EXECUTOR_QUEUE", 64, 4096)),
+      nextRequestId_(1)
 {
     server_.setConnectionCallback(
         std::bind(&ChatServer::onConnection, this, std::placeholders::_1));
@@ -102,6 +128,11 @@ void ChatServer::dispatchFrame(const muduo::net::TcpConnectionPtr &connection,
         dispatchHeartbeat(connection, request);
         return;
     }
+    if (type == AI_CHAT_MSG)
+    {
+        dispatchAiChat(connection, std::move(request), timestamp);
+        return;
+    }
 
     std::weak_ptr<muduo::net::TcpConnection> weakConnection(connection);
     const bool accepted = businessStrand_.trySubmit(
@@ -114,6 +145,33 @@ void ChatServer::dispatchFrame(const muduo::net::TcpConnectionPtr &connection,
     if (!accepted)
     {
         sendProtocolError(connection, "SERVER_BUSY", "connection business queue is full");
+    }
+}
+
+void ChatServer::dispatchAiChat(
+    const muduo::net::TcpConnectionPtr &connection, json request,
+    muduo::Timestamp timestamp)
+{
+    const auto session = service_->sessionFor(connection);
+    if (!session || !session->authenticated)
+    {
+        service_->sendAiError(connection, request, "UNAUTHENTICATED",
+                              "login is required for AI chat");
+        return;
+    }
+
+    json queuedRequest = request;
+    std::weak_ptr<muduo::net::TcpConnection> weakConnection(connection);
+    if (!aiExecutor_.trySubmit(
+            [service = service_, weakConnection,
+             request = std::move(queuedRequest), timestamp]() mutable {
+                const auto liveConnection = weakConnection.lock();
+                if (!liveConnection || !liveConnection->connected()) return;
+                service->aiChat(liveConnection, request, timestamp);
+            }))
+    {
+        service_->sendAiError(connection, request, "AI_SERVICE_BUSY",
+                              "ChatServer AI request queue is full");
     }
 }
 

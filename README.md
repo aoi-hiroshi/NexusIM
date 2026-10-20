@@ -5,8 +5,10 @@ NexusIM 是基于施磊课程 ChatServer 与 MPRPC 示例代码演进的 C++17 �
 当前仓库已完成并实机验证 **阶段 2：Redis Pub/Sub + Nginx 双节点集群** 和
 **阶段 3：MPRPC 加固与独立 UserService 拆分**。Stage 3 已在 Ubuntu 目标机完成
 Protobuf/Muduo/ZooKeeper/MySQL 真实构建、RPC/故障注入及 Stage 1/2 最终回归。
-Stage 4 已新增 Qt 5.12.8 桌面客户端；Windows 本机编译、QtTest、Mock TCP 和界面启动
-验证记录见对应文档，真实 Linux 后端双端联调仍需执行。AIService 留待 Stage 5。
+Stage 4 已新增 Qt 5.12.8 桌面客户端，用户已在测试 PC 完成双端联调。
+Stage 5 已新增独立 AIService、DeepSeek V4 Pro HTTPS 适配、ChatServer AI RPC
+隔离执行器与 Qt AI 对话页；Windows 构建与本地核心测试见对应报告，Linux
+编译和真实 DeepSeek API 仍需在测试虚拟机验收。
 
 ## 当前目录
 
@@ -14,6 +16,7 @@ Stage 4 已新增 Qt 5.12.8 桌面客户端；Windows 本机编译、QtTest、Mo
 - `mprpc/`：在原课程 MPRPC 核心上增加双向分帧、总 Deadline、结构化错误和 Provider 有界执行器。
 - `proto/`：ChatServer 与 UserService 共享的 Protobuf 业务接口。
 - `services/user_service/`：独立 UserService 进程，负责 Login、Register、QueryUser。
+- `services/ai_service/`：独立 AIService，负责多轮上下文和 DeepSeek HTTPS 调用。
 - `client/qt/`：独立 Qt 5.12.8 Windows 客户端、QSS、QtTest 与打包脚本。
 - `docs/phase0-baseline.md`：阶段 0 环境与基线记录。
 - `docs/concurrency-presence-design.md`：异步 RPC、连接顺序和 Redis Presence 的强制设计规则。
@@ -25,12 +28,15 @@ Stage 4 已新增 Qt 5.12.8 桌面客户端；Windows 本机编译、QtTest、Mo
 - `docs/stage4-protocol-matrix.md`：客户端所适配的真实 JSON 协议与功能开放状态。
 - `docs/stage4-qt-client.md`：Qt 客户端实现、构建、打包、测试和双端联调步骤。
 - `docs/stage4-test-report.md`：Stage 4 Windows 实际编译、测试、打包、启动结果与未验证边界。
+- `docs/stage5-implementation.md`：AI RPC、线程、生命周期、安全和 Qt 交互设计。
+- `docs/stage5-linux-testing.md`：Ubuntu 构建、启动、Mock/真实 API 与双客户端验收命令。
+- `docs/stage5-test-report.md`：Stage 5 实际 Windows 测试与 Linux 待验证边界。
 - `docs/v1-test-report.md`：当前 V1 测试结论、真实证据、未完成项和发布判定。
 - `deploy/`：双实例环境模板、Redis 模板、Nginx stream 配置与启动脚本。
 
 ## V1 边界
 
-V1 计划实现 TCP/RPC 分帧、RPC 超时、EventLoop 非阻塞、连接身份校验、安全数据库访问、双 ChatServer + Redis + Nginx、独立 UserService，以及后续的 Qt 5.12.8 客户端和基础 AIService。
+V1 已实现 TCP/RPC 分帧、RPC 超时、EventLoop 非阻塞、连接身份校验、安全数据库访问、双 ChatServer + Redis + Nginx、独立 UserService、Qt 5.12.8 客户端以及基础 AIService。
 
 V1 不承诺 ACK 可靠投递、多设备同步、复杂历史、RPC 多实例治理、流式 AI、RAG 或 MCP。
 

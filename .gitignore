@@ -37,6 +37,8 @@ data/
 .env.*
 !.env.example
 config/local/
+deploy/config/*.env
+!deploy/config/*.env.example
 *.key
 *.pem
 

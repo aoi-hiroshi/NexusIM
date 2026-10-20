@@ -6,7 +6,9 @@
 
 #include <muduo/base/Logging.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <cctype>
 #include <condition_variable>
 #include <memory>
 #include <utility>
@@ -64,6 +66,33 @@ const char *rpcErrorName(mprpc::RpcErrorCode code)
     default:
         return "RPC_UNAVAILABLE";
     }
+}
+
+const char *aiRpcErrorName(mprpc::RpcErrorCode code)
+{
+    switch (code)
+    {
+    case mprpc::RpcErrorCode::DeadlineExceeded:
+        return "AI_UPSTREAM_TIMEOUT";
+    case mprpc::RpcErrorCode::ServerBusy:
+        return "AI_SERVICE_BUSY";
+    case mprpc::RpcErrorCode::Cancelled:
+        return "AI_REQUEST_CANCELLED";
+    case mprpc::RpcErrorCode::DiscoveryUnavailable:
+    case mprpc::RpcErrorCode::ServiceNotFound:
+        return "AI_SERVICE_UNAVAILABLE";
+    default:
+        return "AI_SERVICE_UNAVAILABLE";
+    }
+}
+
+bool validOpaqueId(const std::string &value)
+{
+    if (value.empty() || value.size() > 128) return false;
+    return std::all_of(value.begin(), value.end(), [](unsigned char character) {
+        return std::isalnum(character) != 0 || character == '-' ||
+               character == '_' || character == '.' || character == ':';
+    });
 }
 } // namespace
 
@@ -217,6 +246,13 @@ std::chrono::milliseconds ChatService::rpcTimeout() const
         configured < 100 || configured > 30000 ? 2000 : configured);
 }
 
+std::chrono::milliseconds ChatService::aiRpcTimeout() const
+{
+    const int configured = environmentInt("CHAT_AI_RPC_DEADLINE_MS", 85000);
+    return std::chrono::milliseconds(
+        configured < 1000 || configured > 120000 ? 85000 : configured);
+}
+
 bool ChatService::isCurrentLifecycle(
     const nexusim::SessionContext &session) const
 {
@@ -232,6 +268,19 @@ std::string ChatService::beginRpcRequest(
 {
     const std::string requestId = nodeId_ + "-rpc-" +
                                   std::to_string(nextRpcRequestId_.fetch_add(1));
+    if (!rpcRequests_.add(
+            {requestId, session.connectionId, session.lifecycleId, deadline}))
+        return "";
+    return requestId;
+}
+
+std::string ChatService::beginAiRpcRequest(
+    const nexusim::SessionContext &session,
+    const std::string &clientRequestId,
+    nexusim::PendingRequestRegistry::Clock::time_point deadline)
+{
+    const std::string requestId = nodeId_ + "-ai-" + session.sessionId + "-" +
+                                  clientRequestId;
     if (!rpcRequests_.add(
             {requestId, session.connectionId, session.lifecycleId, deadline}))
         return "";
@@ -557,6 +606,108 @@ void ChatService::oneChat(const muduo::net::TcpConnectionPtr &connection,
              << " target_node=" << lookup.presence.nodeId;
 }
 
+void ChatService::aiChat(const muduo::net::TcpConnectionPtr &connection,
+                         json &request, muduo::Timestamp)
+{
+    const auto session = sessionFor(connection);
+    std::string clientRequestId;
+    std::string conversationId;
+    std::string prompt;
+    if (!session || !session->authenticated)
+    {
+        sendAiError(connection, request, "UNAUTHENTICATED",
+                    "login is required for AI chat");
+        return;
+    }
+    if (!stringField(request, "request_id", clientRequestId) ||
+        !validOpaqueId(clientRequestId) ||
+        !stringField(request, "conversation_id", conversationId) ||
+        !validOpaqueId(conversationId) ||
+        !stringField(request, "prompt", prompt) || prompt.empty() ||
+        prompt.find_first_not_of(" \t\r\n") == std::string::npos ||
+        prompt.size() > 32768)
+    {
+        sendAiError(connection, request, "AI_INVALID_ARGUMENT",
+                    "invalid AI request id, conversation id, or prompt");
+        return;
+    }
+
+    const auto timeout = aiRpcTimeout();
+    const auto deadline = nexusim::PendingRequestRegistry::Clock::now() + timeout;
+    const std::string registryRequestId = beginAiRpcRequest(
+        *session, clientRequestId, deadline);
+    if (registryRequestId.empty())
+    {
+        sendAiError(connection, request, "AI_SERVICE_BUSY",
+                    "duplicate or untrackable AI request");
+        return;
+    }
+
+    const auto rpcResult = aiServiceClient_.chat(
+        session->userId, clientRequestId, conversationId, prompt,
+        static_cast<int>(timeout.count()), deadline);
+    const bool allowExpired = !rpcResult.call.ok &&
+                              rpcResult.call.error ==
+                                  mprpc::RpcErrorCode::DeadlineExceeded;
+    if (!completeRpcRequest(registryRequestId, *session, allowExpired) ||
+        !isCurrentSession(*session))
+    {
+        return;
+    }
+    if (!rpcResult.call.ok)
+    {
+        sendAiError(connection, request, aiRpcErrorName(rpcResult.call.error),
+                    rpcResult.call.message.empty()
+                        ? "AIService RPC call failed"
+                        : rpcResult.call.message);
+        return;
+    }
+    if (rpcResult.statusCode != 0)
+    {
+        sendAiError(connection, request, nexusim::aiStatusName(rpcResult.statusCode),
+                    rpcResult.errorMessage.empty()
+                        ? "AIService returned an error"
+                        : rpcResult.errorMessage);
+        return;
+    }
+    if (rpcResult.content.empty() || rpcResult.content.size() > 786432)
+    {
+        sendAiError(connection, request, "AI_INVALID_RESPONSE",
+                    "AIService returned empty or oversized content");
+        return;
+    }
+
+    json response;
+    response["msgid"] = AI_CHAT_MSG_ACK;
+    response["request_id"] = clientRequestId;
+    response["conversation_id"] = conversationId;
+    response["ok"] = true;
+    response["status_code"] = 0;
+    response["content"] = rpcResult.content;
+    response["model"] = rpcResult.model;
+    response["finish_reason"] = rpcResult.finishReason;
+    response["http_status"] = rpcResult.httpStatus;
+    if (!rpcResult.upstreamRequestId.empty())
+        response["upstream_request_id"] = rpcResult.upstreamRequestId;
+    response["usage"] = {{"prompt_tokens", rpcResult.promptTokens},
+                         {"completion_tokens", rpcResult.completionTokens},
+                         {"total_tokens", rpcResult.totalTokens}};
+    if (!rpcResult.errorMessage.empty())
+        response["warning"] = rpcResult.errorMessage;
+    const std::string responsePayload = response.dump();
+    if (responsePayload.size() > nexusim::FrameCodec::kDefaultMaxFrameLength)
+    {
+        sendAiError(connection, request, "AI_INVALID_RESPONSE",
+                    "AI response exceeds the client frame limit");
+        return;
+    }
+    nexusim::sendFramed(connection, responsePayload);
+    LOG_INFO << "node=" << nodeId_ << " AI request=" << clientRequestId
+             << " user=" << session->userId
+             << " http_status=" << rpcResult.httpStatus
+             << " total_tokens=" << rpcResult.totalTokens;
+}
+
 void ChatService::loginout(const muduo::net::TcpConnectionPtr &connection,
                            json &, muduo::Timestamp)
 {
@@ -696,5 +847,27 @@ void ChatService::sendError(const muduo::net::TcpConnectionPtr &connection,
     response["node_id"] = nodeId_;
     if (recipientId) response["toid"] = *recipientId;
     if (queuedOffline) response["queued_offline"] = *queuedOffline;
+    nexusim::sendFramed(connection, response.dump());
+}
+
+void ChatService::sendAiError(
+    const muduo::net::TcpConnectionPtr &connection, const json &request,
+    const std::string &code, const std::string &message) const
+{
+    json response;
+    response["msgid"] = AI_CHAT_MSG_ACK;
+    response["ok"] = false;
+    response["status_code"] = -1;
+    response["error"] = code;
+    response["errmsg"] = message;
+    response["node_id"] = nodeId_;
+    const auto requestId = request.find("request_id");
+    if (requestId != request.end() && requestId->is_string() &&
+        requestId->get_ref<const std::string &>().size() <= 128)
+        response["request_id"] = *requestId;
+    const auto conversationId = request.find("conversation_id");
+    if (conversationId != request.end() && conversationId->is_string() &&
+        conversationId->get_ref<const std::string &>().size() <= 128)
+        response["conversation_id"] = *conversationId;
     nexusim::sendFramed(connection, response.dump());
 }

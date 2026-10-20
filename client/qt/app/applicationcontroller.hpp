@@ -10,6 +10,7 @@ namespace nexusim {
 namespace client {
 
 class AuthController;
+class AIController;
 class ChatController;
 class LoginWindow;
 class MainWindow;
@@ -38,6 +39,7 @@ private:
     std::unique_ptr<SessionController> session_;
     std::unique_ptr<AuthController> auth_;
     std::unique_ptr<ChatController> chat_;
+    std::unique_ptr<AIController> ai_;
     std::unique_ptr<LoginWindow> loginWindow_;
     std::unique_ptr<MainWindow> mainWindow_;
 };

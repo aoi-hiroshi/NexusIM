@@ -1,12 +1,12 @@
 # NexusIM V1 测试报告
 
-> 报告更新日期：2026-10-19（Asia/Shanghai）
+> 报告更新日期：2026-10-20（Asia/Shanghai）
 >
 > Stage 2 Linux 被测提交：`718ff03979365822f16c9a139d94b85cc74481f6`
 >
 > Stage 3 Linux 被测提交：`ba686aca0e143cc9dc7b7b1faa28636bbddd8acb`
 >
-> 当前结论：**阶段 1、阶段 2、阶段 3 已达到各自当前范围的验收条件；Stage 4 Qt5 客户端已完成 Windows 编译、自动化测试、打包与启动验证，但尚未执行 Windows/Linux 真实双端联调；AIService 和完整 Docker Compose 尚未实现，完整 V1 仍不具备发布条件。**
+> 当前结论：**阶段 1–3 已通过对应范围验收；Stage 4 的 Windows 双客户端联调已由用户确认通过。Stage 5 源码、Windows Qt 构建、核心/Mock 测试已完成，Linux 编译和真实 DeepSeek API 仍待测试机验收。完整 Docker Compose 仍未完成。**
 
 ## 1. 执行摘要
 
@@ -15,8 +15,8 @@
 - Stage 2 的集群协议单测、线程边界源码守卫和 Python 探针语法检查已经通过；Linux 实机成功编译并启动两个 ChatServer，Redis 两个节点频道在空闲 10 秒后仍各保持 1 个订阅者。
 - 本节点直发、双向跨节点 Pub/Sub、跨节点重复登录、离线单次入库、Nginx `:8000` 轮询分流、Redis 停机显式失败与离线回退、节点崩溃后 TTL 清理均取得真实通过输出。
 - Stage 3 已完成 MPRPC 双向分帧、总 Deadline、Provider 线程隔离和独立 UserService；Windows 可移植测试与 Linux 真实 RPC、故障注入、生命周期和 Stage 1/2 回归均通过。
-- Stage 4 Qt 5.12.8 客户端已通过 Debug/Release 构建、4 组 QtTest、Mock TCP、发布打包和双进程启动验证；真实 Linux 后端双端聊天尚未执行。
-- V1 规划中的 AIService、真实 LLM API 和 Docker Compose 尚未实现或验收。本报告不能作为完整 V1 发布批准。
+- Stage 4 Qt 5.12.8 客户端的 Windows 双端真实联调已由用户确认通过；早期报告中的待执行状态由此更新。
+- Stage 5 已实现独立 AIService、DeepSeek HTTPS 适配、ChatServer AI RPC 和 Qt AI 页；Windows 本地 6/6 QtTest 和 1/1 AI 核心测试通过，Linux/真实 API 待验收。
 - 未执行吞吐量、P95/P99 延迟、长期稳定性或内存泄漏测试，本报告不提供任何推测性性能数据。
 
 ## 2. 测试范围与判定规则
@@ -111,10 +111,10 @@
 | S4-02 | JSON 协议与 RequestManager | Windows QtTest | 通过 | 协议及请求生命周期两组测试均通过 |
 | S4-03 | QTcpSocket 异步收包、断线和连接拒绝 | Windows Mock TCP | 通过 | 本机 `QTcpServer` 驱动的 `qt_networkclient_tests` 通过 |
 | S4-04 | Release 打包、启动和双开 | Windows | 通过 | Qt/VC142 运行库齐全；两个独立进程同时创建窗口 |
-| S4-05 | Windows 客户端连接 Linux 双节点/Nginx | Windows + Linux | 待执行 | 当前没有真实 Windows/Linux 连接输出，不以 Mock 结果替代 |
+| S4-05 | Windows 客户端连接 Linux 双节点/Nginx | Windows + Linux | 通过（用户确认） | 用户报告双端测试均通过；本仓库未保存原始终端日志 |
 | V1-01 | UserService 经 MPRPC 的 Login/Register/QueryUser | Linux | 通过 | Linux 构建、ZooKeeper 注册、真实 MySQL RPC 及密码哈希均通过 |
-| V1-02 | Qt 5.12.8 登录、注册、单聊、AI入口 | Windows | 部分通过 | 客户端实现、单测、打包和启动通过；真实后端双端联调待执行，AI 仅 Stage 5 占位 |
-| V1-03 | AIService + LLM API | Linux | 未实现 | 尚未开发，不存在真实 API 测试 |
+| V1-02 | Qt 5.12.8 登录、注册、单聊、AI 页 | Windows | 部分通过 | 双端联调由用户确认；Stage 5 AI 页 Windows 构建、单测和打包通过，真实 AI 待 Linux |
+| V1-03 | AIService + LLM API | Linux | 部分通过 | C++ 实现与 Windows 可移植测试已完成；Linux 构建、Mock libcurl 及真实 API 待执行 |
 | V1-04 | Docker Compose 全栈启动 | Linux | 未实现/待执行 | 当前只有 Stage 2 部署配置和脚本，未完成全栈 Compose 验收 |
 
 ## 5. 本轮重新执行结果
@@ -293,7 +293,7 @@ presence_crash_probe: PASS
 4. **Redis 不自动重连。** Redis 中断后当前进程按 fail-closed 处理，恢复 Redis 后仍需重启两个 ChatServer；自动退避重连不在 Stage 2 范围。
 5. **安全验证仍不完整。** SQL 转义已实现，但缺少单引号、超长 UTF-8、畸形 JSON 批量输入等专项黑盒记录。
 6. **没有性能结论。** 未执行并发连接、吞吐量、延迟分位、长稳、资源占用和 Valgrind/ASan，因此不能给出容量指标。
-7. **完整 V1 功能缺口。** RPC UserService 已通过 Linux 实机验收；Qt5 客户端、AIService 和 Docker Compose 仍未完成。
+7. **完整 V1 验收缺口。** Qt5 和 AIService 代码已完成，但 Stage 5 尚缺 Linux/真实 API 证据，完整 Docker Compose 仍未完成。
 
 ## 9. 发布判定
 
@@ -311,7 +311,7 @@ presence_crash_probe: PASS
 
 ### 完整 V1
 
-**结论：不通过发布验收。** 原因不是现有测试失败，而是 UserService RPC 尚缺 Linux 验收，且 Qt5、AIService、Docker Compose 等承诺范围尚未实现。
+**结论：尚不通过完整发布验收。** 原因是 Stage 5 Linux/真实 API 和完整 Docker Compose 尚无运行证据，而不是当前 Windows 测试失败。
 
 ## 10. Stage 3 Linux 验收与保留回归
 
