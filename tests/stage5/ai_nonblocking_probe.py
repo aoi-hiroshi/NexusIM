@@ -47,6 +47,8 @@ def run(args: argparse.Namespace) -> None:
                 f"heartbeat was blocked by AI for {heartbeat_seconds:.3f}s")
         if ai_response is None:
             raise RuntimeError("AI response was not received")
+        if ai_response.get("ok") is not True:
+            raise RuntimeError(f"AI request failed: {ai_response}")
         print("stage5_ai_nonblocking_probe: PASS "
               f"heartbeat_seconds={heartbeat_seconds:.3f} "
               f"ai_ok={ai_response.get('ok')}")
