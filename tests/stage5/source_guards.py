@@ -21,6 +21,7 @@ chat_service = read("chatserver/src/server/chatservice.cpp")
 qt_protocol = read("client/qt/protocol/messageprotocol.cpp")
 qt_ai = read("client/qt/controllers/aicontroller.cpp")
 server_ids = read("chatserver/include/public.hpp")
+ai_cmake = read("services/ai_service/CMakeLists.txt")
 
 require(deepseek, 'environmentOr("DEEPSEEK_API_KEY", "")',
         "environment-only API key")
@@ -36,6 +37,8 @@ require(chat_service, "beginAiRpcRequest", "AI pending request lifecycle")
 require(qt_protocol, 'QStringLiteral("prompt")', "Qt AI request")
 require(qt_ai, "request_id", "Qt request correlation")
 require(server_ids, "AI_CHAT_MSG", "server AI message id")
+require(ai_cmake, "${CMAKE_SOURCE_DIR}/chatserver/thirdparty",
+        "AIService bundled JSON include path")
 
 if "CURLOPT_SSL_VERIFYPEER, 0" in deepseek or "CURLOPT_SSL_VERIFYHOST, 0" in deepseek:
     raise AssertionError("TLS certificate verification must not be disabled")

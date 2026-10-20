@@ -10,7 +10,8 @@ add_executable(AIService
 
 target_include_directories(AIService PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/chatserver/include)
+    ${CMAKE_SOURCE_DIR}/chatserver/include
+    ${CMAKE_SOURCE_DIR}/chatserver/thirdparty)
 
 target_link_libraries(AIService PRIVATE
     mprpc
