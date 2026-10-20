@@ -72,11 +72,15 @@ Get-ChildItem -LiteralPath $crtDirectory -Filter "*.dll" -File |
 
 $platformPlugin = Join-Path $Destination "platforms\qwindows.dll"
 $coreLibrary = Join-Path $Destination "Qt5Core.dll"
+$networkLibrary = Join-Path $Destination "Qt5Network.dll"
+$widgetsLibrary = Join-Path $Destination "Qt5Widgets.dll"
 $compilerRuntime = Join-Path $Destination "vcruntime140.dll"
 if (-not (Test-Path -LiteralPath $platformPlugin -PathType Leaf) -or
     -not (Test-Path -LiteralPath $coreLibrary -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $networkLibrary -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $widgetsLibrary -PathType Leaf) -or
     -not (Test-Path -LiteralPath $compilerRuntime -PathType Leaf)) {
-    throw "Package validation failed: Qt runtime, MSVC runtime, or qwindows plugin is missing."
+    throw "Package validation failed: Qt Core/Network/Widgets, MSVC runtime, or qwindows plugin is missing."
 }
 
 Write-Host "Package ready: $Destination"

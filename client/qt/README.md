@@ -47,6 +47,18 @@ powershell -ExecutionPolicy Bypass -File client/qt/package.ps1 -Configuration Re
 dist\NexusIMClient-Release\NexusIMClient.exe --host 192.168.1.100 --port 8000
 ```
 
+For the final reproducible Stage 7 package (build, CTest, `windeployqt`,
+manifest, ZIP and SHA-256):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File client/qt/release.ps1 `
+  -Version 1.0.0-stage7 `
+  -QtRoot E:\Qt\Qt5.12.8\5.12.8\msvc2017_64
+```
+
+The resulting ZIP is written below `dist/`. It contains no server
+password, DeepSeek API key, or fixed deployment address.
+
 Use port 6001 or 6002 for deterministic node testing, and port 8000 for the
 Nginx Stream entry. Settings can also be changed in the login window. Running
 the executable twice is supported; no single-instance lock is used.

@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -405,14 +406,24 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     }
 
     sockaddr_in serverAddress{};
-    serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(port);
-    if (::inet_pton(AF_INET, ip.c_str(), &serverAddress.sin_addr) != 1)
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    addrinfo *resolved = nullptr;
+    const std::string portText = std::to_string(port);
+    const int resolveResult = ::getaddrinfo(
+        ip.c_str(), portText.c_str(), &hints, &resolved);
+    if (resolveResult != 0 || resolved == nullptr ||
+        resolved->ai_addrlen < static_cast<socklen_t>(sizeof(sockaddr_in)))
     {
         fail(controller, mprpc::RpcErrorCode::InvalidAddress,
-             "RPC endpoint must contain a valid IPv4 address");
+             "RPC endpoint could not be resolved: " + ip);
+        if (resolved != nullptr) ::freeaddrinfo(resolved);
         return;
     }
+    serverAddress = *reinterpret_cast<sockaddr_in *>(resolved->ai_addr);
+    ::freeaddrinfo(resolved);
 
     const int connectResult = ::connect(
         socketHandle.get(), reinterpret_cast<sockaddr *>(&serverAddress),

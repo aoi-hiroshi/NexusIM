@@ -157,7 +157,8 @@ void RpcProvider::NotifyService(google::protobuf::Service *service)
 bool RpcProvider::Run()
 {
     auto &config = MprpcApplication::GetInstance().GetConfig();
-    const std::string ip = config.LoadOr("rpcserverip", "127.0.0.1");
+    const std::string bindIp = config.LoadOr("rpcserverip", "127.0.0.1");
+    const std::string advertiseIp = config.LoadOr("rpcadvertiseip", bindIp);
     const int portValue = positiveInt(config.LoadOr("rpcserverport", "8001"),
                                       8001);
     if (portValue <= 0 || portValue > 65535)
@@ -165,8 +166,17 @@ bool RpcProvider::Run()
         LOG_ERR("invalid RPC provider port");
         return false;
     }
+    if (advertiseIp.empty() || advertiseIp == "0.0.0.0" ||
+        advertiseIp.find(':') != std::string::npos)
+    {
+        LOG_ERR("invalid RPC advertised endpoint; configure a reachable IPv4 address or DNS name");
+        std::cerr << "MPRPC_RPC_ADVERTISE_IP must be a reachable IPv4 address "
+                     "or DNS name, never 0.0.0.0"
+                  << std::endl;
+        return false;
+    }
 
-    muduo::net::InetAddress address(ip, static_cast<std::uint16_t>(portValue));
+    muduo::net::InetAddress address(bindIp, static_cast<std::uint16_t>(portValue));
     muduo::net::TcpServer server(&m_eventLoop, address, "NexusIM-RpcProvider");
     server.setConnectionCallback(
         std::bind(&RpcProvider::OnConnection, this, std::placeholders::_1));
@@ -208,7 +218,8 @@ bool RpcProvider::Run()
         for (const auto &methodEntry : serviceEntry.second.m_methodMap)
         {
             const std::string methodPath = servicePath + "/" + methodEntry.first;
-            const std::string endpoint = ip + ":" + std::to_string(portValue);
+            const std::string endpoint = advertiseIp + ":" +
+                                         std::to_string(portValue);
             if (!createEphemeralWithRetry(zkClient, methodPath, endpoint,
                                           registrationDeadline, zkError))
             {
@@ -223,7 +234,8 @@ bool RpcProvider::Run()
     // Do not create Muduo I/O threads until every method is registered. This
     // keeps a registration failure from leaving a non-serving process alive.
     server.start();
-    LOG_INFO("RpcProvider listening on %s:%d", ip.c_str(), portValue);
+    LOG_INFO("RpcProvider listening on %s:%d and advertising %s:%d",
+             bindIp.c_str(), portValue, advertiseIp.c_str(), portValue);
     m_eventLoop.loop();
     return true;
 }

@@ -9,6 +9,7 @@ namespace
 {
 const std::unordered_map<std::string, std::string> kEnvironmentNames{
     {"rpcserverip", "MPRPC_RPC_SERVER_IP"},
+    {"rpcadvertiseip", "MPRPC_RPC_ADVERTISE_IP"},
     {"rpcserverport", "MPRPC_RPC_SERVER_PORT"},
     {"zookeeperip", "MPRPC_ZOOKEEPER_IP"},
     {"zookeeperport", "MPRPC_ZOOKEEPER_PORT"},

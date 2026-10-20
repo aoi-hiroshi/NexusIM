@@ -1,0 +1,287 @@
+name: nexusim
+
+x-backend: &backend
+  image: nexusim/backend:${NEXUSIM_IMAGE_TAG:-stage7}
+  build:
+    context: .
+    dockerfile: deploy/docker/Dockerfile
+    target: runtime
+    args:
+      UBUNTU_VERSION: "24.04"
+      MUDUO_COMMIT: b55b0ac6a10d4ded1301c3172e779ec46ada2ab3
+      BUILD_REVISION: ${NEXUSIM_BUILD_REVISION:-unknown}
+  init: true
+  restart: unless-stopped
+  networks:
+    - nexusim-net
+
+x-rpc-client: &rpc-client
+  MPRPC_ZOOKEEPER_IP: zookeeper
+  MPRPC_ZOOKEEPER_PORT: "2181"
+  MPRPC_ZK_CONNECT_TIMEOUT_MS: "2000"
+  MPRPC_ZK_SESSION_TIMEOUT_MS: "5000"
+  MPRPC_MAX_FRAME_BYTES: "4194304"
+
+x-database-client: &database-client
+  CHAT_DB_HOST: mysql
+  CHAT_DB_PORT: "3306"
+  CHAT_DB_NAME: ${NEXUSIM_DB_NAME:-nexusim}
+  CHAT_DB_USER: ${NEXUSIM_DB_USER:-nexusim_app}
+  CHAT_DB_PASSWORD: ${NEXUSIM_DB_PASSWORD:?set NEXUSIM_DB_PASSWORD in .env}
+
+x-chatserver: &chatserver
+  <<: *backend
+  command: ["/opt/nexusim/bin/ChatServer"]
+  read_only: true
+  tmpfs:
+    - /tmp
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    zookeeper:
+      condition: service_healthy
+    userservice:
+      condition: service_healthy
+    aiservice:
+      condition: service_healthy
+  environment:
+    <<: [*rpc-client, *database-client]
+    CHAT_LISTEN_IP: 0.0.0.0
+    CHAT_PRESENCE_TTL_SECONDS: "90"
+    CHAT_RPC_DEADLINE_MS: "2000"
+    CHAT_AI_RPC_DEADLINE_MS: "85000"
+    CHAT_AI_EXECUTOR_THREADS: "4"
+    CHAT_AI_EXECUTOR_QUEUE: "64"
+    CHAT_GROUP_MAX_RECIPIENTS: "256"
+    CHAT_REDIS_HOST: redis
+    CHAT_REDIS_PORT: "6379"
+    CHAT_REDIS_USERNAME: ""
+    CHAT_REDIS_PASSWORD: ${NEXUSIM_REDIS_PASSWORD:?set NEXUSIM_REDIS_PASSWORD in .env}
+
+services:
+  mysql:
+    image: mysql:8.4.11
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${NEXUSIM_DB_ROOT_PASSWORD:?set NEXUSIM_DB_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${NEXUSIM_DB_NAME:-nexusim}
+      MYSQL_USER: ${NEXUSIM_DB_USER:-nexusim_app}
+      MYSQL_PASSWORD: ${NEXUSIM_DB_PASSWORD:?set NEXUSIM_DB_PASSWORD in .env}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --lower-case-table-names=0
+    volumes:
+      - nexusim-mysql-data:/var/lib/mysql
+      - ./deploy/docker/mysql/init/001-schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+      - ./chatserver/sql/003_stage6_relationship_constraints.sql:/docker-entrypoint-initdb.d/020-stage6-constraints.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 30s
+    networks:
+      - nexusim-net
+
+  redis:
+    image: redis:7.4.11-bookworm
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${NEXUSIM_REDIS_PASSWORD:?set NEXUSIM_REDIS_PASSWORD in .env}
+    command:
+      - /bin/sh
+      - -ec
+      - exec redis-server --appendonly yes --appendfsync everysec --save 60 1000 --requirepass "$$REDIS_PASSWORD"
+    volumes:
+      - nexusim-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - nexusim-net
+
+  zookeeper:
+    image: zookeeper:3.9.6-jre-17
+    restart: unless-stopped
+    environment:
+      ZOO_STANDALONE_ENABLED: "true"
+      ZOO_ADMINSERVER_ENABLED: "false"
+      ZOO_4LW_COMMANDS_WHITELIST: ruok,srvr,mntr
+    volumes:
+      - nexusim-zookeeper-data:/data
+      - nexusim-zookeeper-datalog:/datalog
+    healthcheck:
+      test: ["CMD-SHELL", "zkServer.sh status | grep -q 'Mode: standalone'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks:
+      - nexusim-net
+
+  userservice:
+    <<: *backend
+    command: ["/opt/nexusim/bin/UserService"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      mysql:
+        condition: service_healthy
+      zookeeper:
+        condition: service_healthy
+    environment:
+      <<: [*rpc-client, *database-client]
+      MPRPC_RPC_SERVER_IP: 0.0.0.0
+      MPRPC_RPC_ADVERTISE_IP: userservice
+      MPRPC_RPC_SERVER_PORT: "7001"
+      MPRPC_ZK_REGISTRATION_TIMEOUT_MS: "20000"
+      MPRPC_PROVIDER_THREADS: "4"
+      MPRPC_PROVIDER_IO_THREADS: "2"
+      MPRPC_PROVIDER_QUEUE: "512"
+      USER_SERVICE_TEST_DELAY_USER_ID: "-1"
+      USER_SERVICE_TEST_DELAY_MS: "0"
+    expose:
+      - "7001"
+    healthcheck:
+      test: ["CMD", "nexusim-healthcheck", "127.0.0.1", "7001"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  aiservice:
+    <<: *backend
+    command: ["/opt/nexusim/bin/AIService"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      <<: *rpc-client
+      MPRPC_RPC_SERVER_IP: 0.0.0.0
+      MPRPC_RPC_ADVERTISE_IP: aiservice
+      MPRPC_RPC_SERVER_PORT: "7002"
+      MPRPC_ZK_REGISTRATION_TIMEOUT_MS: "20000"
+      MPRPC_PROVIDER_THREADS: "6"
+      MPRPC_PROVIDER_IO_THREADS: "2"
+      MPRPC_PROVIDER_QUEUE: "64"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      DEEPSEEK_THINKING: ${DEEPSEEK_THINKING:-disabled}
+      DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-none}
+      DEEPSEEK_SYSTEM_PROMPT: ${DEEPSEEK_SYSTEM_PROMPT:-You are the NexusIM AI assistant.}
+      DEEPSEEK_HTTP_CONNECT_TIMEOUT_MS: "5000"
+      DEEPSEEK_HTTP_TIMEOUT_MS: "75000"
+      DEEPSEEK_MAX_TOKENS: "2048"
+      DEEPSEEK_MAX_RESPONSE_BYTES: "524288"
+      DEEPSEEK_ALLOW_HTTP_MOCK: "false"
+      AI_HISTORY_TURNS: "10"
+      AI_MAX_CONTEXT_BYTES: "65536"
+      AI_MAX_CONVERSATIONS: "1000"
+      AI_MAX_PROMPT_BYTES: "32768"
+      AI_MAX_CONCURRENT_REQUESTS: "4"
+    expose:
+      - "7002"
+    healthcheck:
+      test: ["CMD", "nexusim-healthcheck", "127.0.0.1", "7002"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  chatserver-1:
+    <<: *chatserver
+    environment:
+      <<: [*rpc-client, *database-client]
+      CHAT_NODE_ID: chatserver-1
+      CHAT_LISTEN_IP: 0.0.0.0
+      CHAT_LISTEN_PORT: "6001"
+      CHAT_PRESENCE_TTL_SECONDS: "90"
+      CHAT_RPC_DEADLINE_MS: "2000"
+      CHAT_AI_RPC_DEADLINE_MS: "85000"
+      CHAT_AI_EXECUTOR_THREADS: "4"
+      CHAT_AI_EXECUTOR_QUEUE: "64"
+      CHAT_GROUP_MAX_RECIPIENTS: "256"
+      CHAT_REDIS_HOST: redis
+      CHAT_REDIS_PORT: "6379"
+      CHAT_REDIS_USERNAME: ""
+      CHAT_REDIS_PASSWORD: ${NEXUSIM_REDIS_PASSWORD:?set NEXUSIM_REDIS_PASSWORD in .env}
+    ports:
+      - "${NEXUSIM_DEBUG_BIND_IP:-127.0.0.1}:6001:6001"
+    healthcheck:
+      test: ["CMD", "nexusim-healthcheck", "127.0.0.1", "6001"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  chatserver-2:
+    <<: *chatserver
+    environment:
+      <<: [*rpc-client, *database-client]
+      CHAT_NODE_ID: chatserver-2
+      CHAT_LISTEN_IP: 0.0.0.0
+      CHAT_LISTEN_PORT: "6002"
+      CHAT_PRESENCE_TTL_SECONDS: "90"
+      CHAT_RPC_DEADLINE_MS: "2000"
+      CHAT_AI_RPC_DEADLINE_MS: "85000"
+      CHAT_AI_EXECUTOR_THREADS: "4"
+      CHAT_AI_EXECUTOR_QUEUE: "64"
+      CHAT_GROUP_MAX_RECIPIENTS: "256"
+      CHAT_REDIS_HOST: redis
+      CHAT_REDIS_PORT: "6379"
+      CHAT_REDIS_USERNAME: ""
+      CHAT_REDIS_PASSWORD: ${NEXUSIM_REDIS_PASSWORD:?set NEXUSIM_REDIS_PASSWORD in .env}
+    ports:
+      - "${NEXUSIM_DEBUG_BIND_IP:-127.0.0.1}:6002:6002"
+    healthcheck:
+      test: ["CMD", "nexusim-healthcheck", "127.0.0.1", "6002"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  nginx:
+    image: nexusim/nginx:1.31.7
+    build:
+      context: .
+      dockerfile: deploy/docker/nginx/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      chatserver-1:
+        condition: service_healthy
+      chatserver-2:
+        condition: service_healthy
+    ports:
+      - "${NEXUSIM_PUBLIC_BIND_IP:-127.0.0.1}:8000:8000"
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nexusim-net
+
+networks:
+  nexusim-net:
+    name: nexusim-net
+    driver: bridge
+
+volumes:
+  nexusim-mysql-data:
+    name: nexusim-mysql-data
+  nexusim-redis-data:
+    name: nexusim-redis-data
+  nexusim-zookeeper-data:
+    name: nexusim-zookeeper-data
+  nexusim-zookeeper-datalog:
+    name: nexusim-zookeeper-datalog
