@@ -100,3 +100,12 @@ Stage 5 的官方 API 字段及模型配置以 DeepSeek 官方 API 文档为准�
 
 - <https://api-docs.deepseek.com/api/create-chat-completion/>
 - <https://api-docs.deepseek.com/guides/thinking_mode/>
+
+## 8. 当前运行限制
+
+- ZooKeeper 短暂断线由 C 客户端重连；若 session 已永久过期，当前 Provider
+  不会自动建立新 session 并重新注册 ephemeral 方法节点。进程可能仍监听 RPC
+  端口，但调用方会得到 `get failed: no node`。V1 现阶段通过重启对应业务服务
+  恢复，后续需补充受控的重新注册状态机及故障测试。
+- Redis Pub/Sub 与 AI 完整文本回复均不提供端到端可靠 ACK；相关限制沿用
+  Stage 2 与 V1 可靠性边界。

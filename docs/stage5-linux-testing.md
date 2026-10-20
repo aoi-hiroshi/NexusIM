@@ -137,6 +137,8 @@ build/stage5/tests/stage5/stage5_deepseek_client_probe AI_OK
 分别以 `401`、`429`、`500`、`timeout`、`invalid-json`、`empty-choices`、
 `empty-content`、`long`、`unicode` 重启 Mock，并验证对应状态。
 `context` 场景会将收到的 user messages 标记到回复中，用于验证多轮上下文。
+`stage5_deepseek_client_probe` 的调用 deadline 固定为 2000 ms；因此使用默认
+三秒 `timeout` Mock 时预期状态是 `AI_UPSTREAM_TIMEOUT`，不是 `AI_OK`。
 
 ## 8. 真实 API 与 RPC 测试
 
@@ -203,3 +205,6 @@ python3 tests/stage5/ai_concurrency_probe.py \
 - `AI_AUTH_FAILED`：在 DeepSeek 控制台检查 Key/权限，不要关闭 TLS。
 - `AI_UPSTREAM_TIMEOUT`：检查虚拟机外网、DNS 和三层超时大小。
 - 启动时 znode 存在：等待旧 ZooKeeper session 在有界时间内失效，不要无条件删除别的实例节点。
+- 进程仍监听但 RPC 显示 `get failed: no node`：检查日志是否出现 ZooKeeper
+  `session ... has expired`。当前 V1 需重启相应 UserService/AIService 以建立新
+  session 并恢复临时节点；不要仅用监听端口判断服务健康。
