@@ -9,7 +9,19 @@
 - 本报告只将 Windows 实际执行结果或已提供完整终端证据的 Ubuntu 项目标为
   PASS；尚未执行的 Qt 双端 UI 验收继续标为 NOT RUN。
 
-## 2. Windows 实际结果
+## 2. 验收结论
+
+- Stage 5 Linux 服务端、真实 DeepSeek、双 ChatServer/Nginx AI 路由及故障
+  隔离：**PASS**。
+- Windows Qt Release 构建、自动化测试和真实 AI 单客户端界面：**PASS**。
+- Windows 双客户端的完整 UI 场景：**NOT RUN**。
+- ZooKeeper session 永久过期后的 Provider 自动重新注册：**已知缺口**。
+
+因此当前结论为：Stage 5 的核心开发目标和主链路已经通过，最终整体验收需在
+双客户端 UI 场景完成并处理或明确接受 ZooKeeper 自动恢复限制后关闭。本报告
+中的秒数仅记录一次功能验证，不代表吞吐量或性能指标。
+
+## 3. Windows 实际结果
 
 | 项目 | 结果 | 证据 |
 |---|---|---|
@@ -25,11 +37,10 @@
 | Mock HTTP Unicode 请求 | PASS | loopback POST 200，`id=mock-request-id` |
 | Linux 启停脚本语法 | PASS | MSYS2 Bash `-n` |
 | C++ DeepSeekClient 对 Mock HTTP | NOT RUN | Windows 本机未配置 libcurl C++ 开发包 |
-| Linux ChatServer/UserService/AIService 构建 | PASS | Ubuntu 实机构建成功；修复 AIService 的 bundled `json.hpp` include 路径后生成三个可执行文件 |
-| 真实 DeepSeek API | PASS | AIService RPC 返回 `status=0`、HTTP 200；ChatServer 端到端见下表 |
-| Windows 双客户端 Stage 5 端到端 | NOT RUN | 待用户在测试 PC 验收 |
+| Qt 真实 AI 单客户端 | PASS | Release 客户端连接 `chatserver-1`，中文提问成功获得 DeepSeek V4 Pro 的非递归 C++ 快排回复；中文、长代码和消息气泡显示正常 |
+| Windows 双客户端 Stage 5 端到端 | NOT RUN | 待完成并发 AI、单聊并发、清空/新对话、服务故障 UI 场景 |
 
-## 3. 自动化覆盖
+## 4. 自动化覆盖
 
 `stage5_ai_core_tests` 验证：
 
@@ -50,7 +61,7 @@ QtTest 新增验证：
 JSON、空 choices、空 content、长文本、中文/特殊字符和上下文回显。脚本输出始终明确标识为
 Mock，不伪装真实 DeepSeek 回复。
 
-## 4. Ubuntu 实际结果
+## 5. Ubuntu 实际结果
 
 测试机于 2026-10-20 完成以下实测；数值仅代表本次功能验证，不作为性能
 基准：
@@ -75,12 +86,27 @@ Mock，不伪装真实 DeepSeek 回复。
 | API Key 缺失 | PASS | 返回 `AI_CONFIG_MISSING` |
 | Stage 1/2 最终回归 | PASS | FrameCodec、连接身份、Redis 跨节点、Presence、离线单存储、Nginx 3/3 均通过 |
 
+真实 DeepSeek 最终回归的三条入口均成功：ChatServer-1 为 1.358 s、
+ChatServer-2 为 1.240 s、Nginx 8000 为 1.220 s。三次返回均标识
+`model=deepseek-v4-pro`；这些数值只用于证明调用在有界时间内完成。
+
 测试期间还观察到：长时间运行的 UserService 在 ZooKeeper session 永久过期后
 仍监听 7001，但临时服务节点已消失；重启 UserService 可恢复注册。自动创建新
 session 并重新注册服务节点尚未实现，因此不得将“端口监听”单独作为 RPC 健康
 依据。
 
-## 5. 待验收与已知限制
+## 6. 故障与边界验证
+
+- 关闭 AIService 后，ChatServer 返回 `AI_SERVICE_UNAVAILABLE`，同时注册、
+  Redis 跨节点单聊、Presence、离线消息和 Nginx 分配继续通过。
+- 移除 API Key 后，DeepSeekClient 返回 `AI_CONFIG_MISSING`。
+- 401、429、500、非法 JSON、空 choices、空 content 和两秒 deadline 超时
+  均映射为预期的结构化状态。
+- 三秒 Mock 请求期间，同连接 heartbeat 和另一连接跨节点单聊均约 0.001 s；
+  Mock 最终回复成功，排除了“快速失败所以看似非阻塞”的假阳性。
+- 注销并重新登录后，旧 session 的迟到 AI 响应没有投递到新 session。
+
+## 7. 待验收与已知限制
 
 1. Windows 两个 Release 客户端通过隔离测试网的 Nginx 8000 完成 AI 页面、
    普通聊天并发、错误展示、清空/新对话及注销迟到响应验收。
@@ -88,4 +114,10 @@ session 并重新注册服务节点尚未实现，因此不得将“端口监听
    的恢复测试；修复前由启停脚本重启 UserService/AIService 恢复。
 3. 客户端 TCP 链路仍无 TLS，只允许隔离测试网络使用。
 
-详细复现命令见 `docs/stage5-linux-testing.md`。
+## 8. 复现资料
+
+- Linux 构建、配置、Mock、RPC 和黑盒探针命令：
+  `docs/stage5-linux-testing.md`
+- AI 调用链、线程边界、超时和错误映射：
+  `docs/stage5-implementation.md`
+- Qt5 构建、测试与打包：`client/qt/README.md`
