@@ -9,10 +9,9 @@ namespace
 bool exists(MySQL &mysql, const char *sql, int id, bool &querySucceeded)
 {
     querySucceeded = false;
-    MYSQL_RES *result = mysql.queryPrepared(sql, {MySQLParameter::integer(id)});
+    auto result = mysql.queryPrepared(sql, {MySQLParameter::integer(id)});
     if (result == nullptr) return false;
-    const bool found = mysql_fetch_row(result) != nullptr;
-    mysql_free_result(result);
+    const bool found = !result->rows.empty();
     querySucceeded = true;
     return found;
 }
@@ -21,14 +20,12 @@ bool membership(MySQL &mysql, int userId, int groupId, bool &querySucceeded,
                 std::string *role = nullptr)
 {
     querySucceeded = false;
-    MYSQL_RES *result = mysql.queryPrepared(
+    auto result = mysql.queryPrepared(
         "select `grouprole` from `GroupUser` where `user_id`=? and `group_id`=? limit 1",
         {MySQLParameter::integer(userId), MySQLParameter::integer(groupId)});
     if (result == nullptr) return false;
-    MYSQL_ROW row = mysql_fetch_row(result);
-    if (row != nullptr && role != nullptr) *role = row[0] == nullptr ? "" : row[0];
-    const bool found = row != nullptr;
-    mysql_free_result(result);
+    const bool found = !result->rows.empty();
+    if (found && role != nullptr) *role = result->rows.front()[0].value_or("");
     querySucceeded = true;
     return found;
 }
@@ -134,12 +131,11 @@ bool GroupModel::isMember(int userid, int groupid, bool &querySucceeded)
     if (userid <= 0 || groupid <= 0) return false;
     MySQL mysql;
     if (!mysql.connect()) return false;
-    MYSQL_RES *result = mysql.queryPrepared(
+    auto result = mysql.queryPrepared(
         "select 1 from `GroupUser` where `user_id`=? and `group_id`=? limit 1",
         {MySQLParameter::integer(userid), MySQLParameter::integer(groupid)});
     if (result == nullptr) return false;
-    const bool found = mysql_fetch_row(result) != nullptr;
-    mysql_free_result(result);
+    const bool found = !result->rows.empty();
     querySucceeded = true;
     return found;
 }
@@ -150,23 +146,21 @@ vector<Group> GroupModel::queryGroups(int userid, bool *querySucceeded)
     if (querySucceeded) *querySucceeded = false;
     MySQL mysql;
     if (!mysql.connect()) return groups;
-    MYSQL_RES *result = mysql.queryPrepared(
+    auto result = mysql.queryPrepared(
         "select a.`id`,a.`groupname`,a.`groupdesc`,b.`grouprole` "
         "from `AllGroup` a inner join `GroupUser` b on a.`id`=b.`group_id` "
         "where b.`user_id`=? order by a.`id`",
         {MySQLParameter::integer(userid)});
     if (result == nullptr) return groups;
-    MYSQL_ROW row;
-    while ((row = mysql_fetch_row(result)) != nullptr)
+    for (const auto &row : result->rows)
     {
         Group group;
-        group.setId(std::atoi(row[0]));
-        group.setName(row[1] == nullptr ? "" : row[1]);
-        group.setDesc(row[2] == nullptr ? "" : row[2]);
-        group.setRole(row[3] == nullptr ? "" : row[3]);
+        group.setId(std::atoi(row[0].value_or("0").c_str()));
+        group.setName(row[1].value_or(""));
+        group.setDesc(row[2].value_or(""));
+        group.setRole(row[3].value_or(""));
         groups.push_back(std::move(group));
     }
-    mysql_free_result(result);
     if (querySucceeded) *querySucceeded = true;
     return groups;
 }
@@ -179,16 +173,15 @@ vector<GroupUser> GroupModel::queryMembers(int userid, int groupid,
     querySucceeded = false;
     MySQL mysql;
     if (!mysql.connect()) return users;
-    MYSQL_RES *membershipResult = mysql.queryPrepared(
+    auto membershipResult = mysql.queryPrepared(
         "select 1 from `GroupUser` where `user_id`=? and `group_id`=? limit 1",
         {MySQLParameter::integer(userid), MySQLParameter::integer(groupid)});
     if (membershipResult == nullptr) return users;
-    authorized = mysql_fetch_row(membershipResult) != nullptr;
-    mysql_free_result(membershipResult);
+    authorized = !membershipResult->rows.empty();
     querySucceeded = true;
     if (!authorized) return users;
 
-    MYSQL_RES *result = mysql.queryPrepared(
+    auto result = mysql.queryPrepared(
         "select u.`id`,u.`name`,u.`state`,gu.`grouprole` from `User` u "
         "inner join `GroupUser` gu on gu.`user_id`=u.`id` "
         "where gu.`group_id`=? order by u.`id`",
@@ -198,17 +191,15 @@ vector<GroupUser> GroupModel::queryMembers(int userid, int groupid,
         querySucceeded = false;
         return users;
     }
-    MYSQL_ROW row;
-    while ((row = mysql_fetch_row(result)) != nullptr)
+    for (const auto &row : result->rows)
     {
         GroupUser user;
-        user.setId(std::atoi(row[0]));
-        user.setName(row[1] == nullptr ? "" : row[1]);
-        user.setState(row[2] == nullptr ? "offline" : row[2]);
-        user.setRole(row[3] == nullptr ? "" : row[3]);
+        user.setId(std::atoi(row[0].value_or("0").c_str()));
+        user.setName(row[1].value_or(""));
+        user.setState(row[2].value_or("offline"));
+        user.setRole(row[3].value_or(""));
         users.push_back(std::move(user));
     }
-    mysql_free_result(result);
     return users;
 }
 
@@ -220,16 +211,15 @@ vector<int> GroupModel::queryGroupUsers(int userid, int groupid,
     querySucceeded = false;
     MySQL mysql;
     if (!mysql.connect()) return ids;
-    MYSQL_RES *membershipResult = mysql.queryPrepared(
+    auto membershipResult = mysql.queryPrepared(
         "select 1 from `GroupUser` where `user_id`=? and `group_id`=? limit 1",
         {MySQLParameter::integer(userid), MySQLParameter::integer(groupid)});
     if (membershipResult == nullptr) return ids;
-    senderIsMember = mysql_fetch_row(membershipResult) != nullptr;
-    mysql_free_result(membershipResult);
+    senderIsMember = !membershipResult->rows.empty();
     querySucceeded = true;
     if (!senderIsMember) return ids;
 
-    MYSQL_RES *result = mysql.queryPrepared(
+    auto result = mysql.queryPrepared(
         "select distinct `user_id` from `GroupUser` where `group_id`=? and `user_id`<>? "
         "order by `user_id`",
         {MySQLParameter::integer(groupid), MySQLParameter::integer(userid)});
@@ -238,9 +228,7 @@ vector<int> GroupModel::queryGroupUsers(int userid, int groupid,
         querySucceeded = false;
         return ids;
     }
-    MYSQL_ROW row;
-    while ((row = mysql_fetch_row(result)) != nullptr)
-        ids.push_back(std::atoi(row[0]));
-    mysql_free_result(result);
+    for (const auto &row : result->rows)
+        ids.push_back(std::atoi(row[0].value_or("0").c_str()));
     return ids;
 }

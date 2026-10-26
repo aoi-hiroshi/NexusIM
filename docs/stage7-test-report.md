@@ -8,7 +8,9 @@ Baseline: `fcd90ac feat: implement friends groups and distributed group chat`
 Stage 7 adds deployment/release engineering only: multi-stage backend image,
 Compose topology, isolated fresh database schema, Docker-aware RPC discovery,
 non-destructive operational scripts, Windows Release packaging and final
-acceptance probes. It does not add business features.
+acceptance probes. It does not add business features. Ubuntu acceptance found
+two compatibility defects and an RPC timeout regression; their targeted fixes
+are recorded below.
 
 ## Results recorded on the Windows development machine
 
@@ -64,7 +66,7 @@ test process `PATH`. `client/qt/release.ps1` now prepends the selected Qt
 passed 8/8 tests. This was a packaging/test-environment issue, not a test
 expectation change.
 
-## Ubuntu/VMware status
+## Ubuntu/VMware status as of 2026-10-21
 
 No Stage 7 Docker command has been executed on the Ubuntu test machine yet.
 Therefore this report does not claim:
@@ -80,6 +82,63 @@ Therefore this report does not claim:
 The exact commands and evidence checklist are in
 `docs/stage7-acceptance.md`. Results from the test PC must be appended
 after execution.
+
+## Ubuntu/VMware results on 2026-10-26
+
+The Ubuntu 26.04 VM was tested over SSH in an isolated worktree based on
+`1ec4727` plus the fixes in this report. The original VM checkout's generated
+files and runtime configuration were preserved. Docker 29.1.3 and Compose
+2.40.3 were installed before this run. No secret values were committed.
+
+| Check | Actual result |
+|---|---|
+| Native Linux build | ChatServer, UserService, AIService and the test targets built successfully |
+| CTest | 5/5 passed: Stage 3 frame/protocol, Stage 5 AI core, Stage 6 protocol, Stage 7 source guards |
+| Backend and Nginx images | Built successfully on Ubuntu 24.04 bases |
+| Compose startup | 8/8 services healthy; 6001, 6002 and 8000 bound to `127.0.0.1` |
+| ZooKeeper RPC discovery | Login/Register/QueryUser = `userservice:7001`; AI Chat = `aiservice:7002` |
+| Redis subscriptions | One subscriber on each node channel |
+| `compose-verify.sh` | PASS after the final fixes, including Stage 1/2/6 black-box probes and real AI through port 8000 |
+| Persistent data | `persistence_probe.py prepare`, Compose down/up without `-v`, then `verify`: PASS |
+| Nginx node failure | With chatserver-1 stopped, a new port-8000 login reached chatserver-2; node 1 restored healthy |
+| Redis failure | Group send reported `queued=1`, `failed=0`, `redis_published=0`; Redis and both ChatServers restored healthy |
+| UserService failure | Login returned `RPC_TIMEOUT` in 2.011 s; Register, QueryUser/AddFriend and QueryUser/DirectChat each returned explicit `RPC_TIMEOUT` within a 2.012 s three-method window; UserService restored healthy |
+| AIService failure | Returned `AI_SERVICE_UNAVAILABLE` in 8.009 s; ordinary cross-node chat passed while AI was stopped |
+| Real DeepSeek API | Container request through Nginx passed with `deepseek-v4-pro`, 1.477 s in the post-fault final regression |
+
+The post-fault `compose-verify.sh` run reported: framed protocol PASS, session
+security PASS, local and cross-node direct chat PASS, duplicate login PASS,
+Presence PASS, Nginx distribution `3/3`, Stage 6 friend/group probe PASS,
+and real AI chat PASS (`group_id=5`). The script ended with
+`Stage 7 Docker black-box regression: PASS` and exit code 0.
+
+### Issues discovered and repaired on Ubuntu
+
+1. Ubuntu's MySQL C library does not expose `mysql_stmt_get_result`.
+   Prepared SELECTs now use portable bind/fetch APIs and RAII result storage;
+   native and container business probes both passed afterward.
+2. Docker Hub and GitHub Git transport were unreachable from the VM. The
+   pinned base images were retrieved from a reachable public registry for this
+   test. The Dockerfile now downloads the pinned Muduo archive from GitHub
+   codeload and verifies its SHA-256 before building it. The image build limits
+   parallel compilation to two jobs on this 3.3 GiB VM.
+3. The pinned Nginx image has stream compiled in statically. The image check
+   and configuration were corrected; final `nginx -t` succeeded without the
+   earlier worker-connection warning.
+4. The first UserService outage test waited beyond the RPC deadline without a
+   client response. ChatServer now schedules a per-request EventLoop timeout
+   that sends an explicit error while the blocking worker is still occupied.
+   The repaired container returned `RPC_TIMEOUT` in 2.011 s. Register and both
+   reachable QueryUser paths also returned bounded errors. Late worker
+   completion cannot send a second reply for the same request.
+5. The first AI outage probe used an 8-second socket timeout and timed out.
+   With a 30-second test timeout, the service returned the expected explicit
+   error in 8.009 s. This is a bounded failure response, but the 8-second
+   discovery delay remains a V1 latency limitation.
+
+The VM's Compose stack was left running and healthy after verification. Its
+port-8000 bind is loopback-only. The final Windows packaged-client demonstration
+against this specific Compose deployment was not run in this session.
 
 ## Release boundary
 

@@ -351,14 +351,36 @@ std::string ChatService::beginAiRpcRequest(
 
 bool ChatService::completeRpcRequest(
     const std::string &requestId, const nexusim::SessionContext &session,
-    bool allowExpired)
+    bool *expired)
 {
     const auto completion = rpcRequests_.complete(
         requestId, session.connectionId, session.lifecycleId);
+    if (expired != nullptr)
+        *expired = completion == nexusim::PendingRequestRegistry::Completion::Expired;
     return (completion == nexusim::PendingRequestRegistry::Completion::Completed ||
-            (allowExpired &&
-             completion == nexusim::PendingRequestRegistry::Completion::Expired)) &&
+            completion == nexusim::PendingRequestRegistry::Completion::Expired) &&
            isCurrentLifecycle(session);
+}
+
+void ChatService::scheduleRpcTimeout(
+    const muduo::net::TcpConnectionPtr &connection,
+    const nexusim::SessionContext &session, const std::string &requestId,
+    nexusim::PendingRequestRegistry::Clock::time_point deadline,
+    std::function<void(const muduo::net::TcpConnectionPtr &)> onTimeout)
+{
+    const auto remaining = deadline - nexusim::PendingRequestRegistry::Clock::now();
+    const double seconds = std::max(
+        0.0, std::chrono::duration<double>(remaining).count()) + 0.01;
+    std::weak_ptr<muduo::net::TcpConnection> weakConnection(connection);
+    connection->getLoop()->runAfter(
+        seconds, [this, weakConnection, session, requestId,
+                  onTimeout = std::move(onTimeout)] {
+            const auto liveConnection = weakConnection.lock();
+            if (!liveConnection || !liveConnection->connected()) return;
+            if (!completeRpcRequest(requestId, session) ||
+                (session.authenticated && !isCurrentSession(session))) return;
+            onTimeout(liveConnection);
+        });
 }
 
 bool ChatService::bindAuthenticatedOnLoop(
@@ -449,14 +471,27 @@ void ChatService::login(const muduo::net::TcpConnectionPtr &connection,
         nexusim::sendFramed(connection, response.dump());
         return;
     }
+    scheduleRpcTimeout(connection, *existing, rpcRequestId, deadline,
+        [](const muduo::net::TcpConnectionPtr &liveConnection) {
+            json timeoutResponse{{"msgid", LOGIN_MSG_ACK}, {"errno", 6},
+                                 {"error", "RPC_TIMEOUT"},
+                                 {"errmsg", "login RPC deadline exceeded"}};
+            nexusim::sendFramed(liveConnection, timeoutResponse.dump());
+        });
 
     const auto rpcResult = userServiceClient_.login(id, password, deadline);
-    const bool allowExpired = !rpcResult.call.ok &&
-                              rpcResult.call.error ==
-                                  mprpc::RpcErrorCode::DeadlineExceeded;
-    if (!completeRpcRequest(rpcRequestId, *existing, allowExpired))
+    bool expired = false;
+    if (!completeRpcRequest(rpcRequestId, *existing, &expired))
     {
-        // The connection was closed/replaced or the request deadline elapsed.
+        // The connection was closed/replaced or the loop already sent a timeout.
+        return;
+    }
+    if (expired)
+    {
+        response["errno"] = 6;
+        response["error"] = "RPC_TIMEOUT";
+        response["errmsg"] = "login RPC deadline exceeded";
+        nexusim::sendFramed(connection, response.dump());
         return;
     }
     if (!rpcResult.call.ok)
@@ -600,12 +635,25 @@ void ChatService::reg(const muduo::net::TcpConnectionPtr &connection,
         nexusim::sendFramed(connection, response.dump());
         return;
     }
+    scheduleRpcTimeout(connection, *session, rpcRequestId, deadline,
+        [](const muduo::net::TcpConnectionPtr &liveConnection) {
+            json timeoutResponse{{"msgid", REG_MSG_ACK}, {"errno", 2},
+                                 {"error", "RPC_TIMEOUT"},
+                                 {"errmsg", "register RPC deadline exceeded"}};
+            nexusim::sendFramed(liveConnection, timeoutResponse.dump());
+        });
 
     const auto rpcResult = userServiceClient_.registerUser(name, password, deadline);
-    const bool allowExpired = !rpcResult.call.ok &&
-                              rpcResult.call.error ==
-                                  mprpc::RpcErrorCode::DeadlineExceeded;
-    if (!completeRpcRequest(rpcRequestId, *session, allowExpired)) return;
+    bool expired = false;
+    if (!completeRpcRequest(rpcRequestId, *session, &expired)) return;
+    if (expired)
+    {
+        response["errno"] = 2;
+        response["error"] = "RPC_TIMEOUT";
+        response["errmsg"] = "register RPC deadline exceeded";
+        nexusim::sendFramed(connection, response.dump());
+        return;
+    }
     if (!rpcResult.call.ok)
     {
         response["errno"] = 2;
@@ -732,11 +780,21 @@ void ChatService::addFriend(const muduo::net::TcpConnectionPtr &connection,
                              "SERVER_BUSY", "could not track user query");
         return;
     }
+    scheduleRpcTimeout(connection, *session, tracked, deadline,
+        [this, requestId](const muduo::net::TcpConnectionPtr &liveConnection) {
+            sendBusinessResponse(liveConnection, ADD_FRIEND_MSG_ACK, requestId,
+                                 false, "RPC_TIMEOUT", "user query deadline exceeded");
+        });
     const auto user = userServiceClient_.queryUser(friendId, deadline);
-    const bool allowExpired = !user.call.ok &&
-                              user.call.error == mprpc::RpcErrorCode::DeadlineExceeded;
-    if (!completeRpcRequest(tracked, *session, allowExpired) ||
+    bool expired = false;
+    if (!completeRpcRequest(tracked, *session, &expired) ||
         !isCurrentSession(*session)) return;
+    if (expired)
+    {
+        sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
+                             "RPC_TIMEOUT", "user query deadline exceeded");
+        return;
+    }
     if (!user.call.ok)
     {
         sendBusinessResponse(connection, ADD_FRIEND_MSG_ACK, requestId, false,
@@ -1137,16 +1195,27 @@ void ChatService::aiChat(const muduo::net::TcpConnectionPtr &connection,
                     "duplicate or untrackable AI request");
         return;
     }
+    const json timeoutRequest{{"request_id", clientRequestId},
+                              {"conversation_id", conversationId}};
+    scheduleRpcTimeout(connection, *session, registryRequestId, deadline,
+        [this, timeoutRequest](const muduo::net::TcpConnectionPtr &liveConnection) {
+            sendAiError(liveConnection, timeoutRequest, "AI_UPSTREAM_TIMEOUT",
+                        "AIService RPC deadline exceeded");
+        });
 
     const auto rpcResult = aiServiceClient_.chat(
         session->userId, clientRequestId, conversationId, prompt,
         static_cast<int>(timeout.count()), deadline);
-    const bool allowExpired = !rpcResult.call.ok &&
-                              rpcResult.call.error ==
-                                  mprpc::RpcErrorCode::DeadlineExceeded;
-    if (!completeRpcRequest(registryRequestId, *session, allowExpired) ||
+    bool expired = false;
+    if (!completeRpcRequest(registryRequestId, *session, &expired) ||
         !isCurrentSession(*session))
     {
+        return;
+    }
+    if (expired)
+    {
+        sendAiError(connection, timeoutRequest, "AI_UPSTREAM_TIMEOUT",
+                    "AIService RPC deadline exceeded");
         return;
     }
     if (!rpcResult.call.ok)
@@ -1293,14 +1362,23 @@ void ChatService::storeOfflineOrReport(
                   "could not track recipient query", recipientId, false);
         return;
     }
+    scheduleRpcTimeout(sender, *session, rpcRequestId, deadline,
+        [this, recipientId](const muduo::net::TcpConnectionPtr &liveConnection) {
+            sendError(liveConnection, ONE_CHAT_MSG, "RPC_TIMEOUT",
+                      "recipient query deadline exceeded", recipientId, false);
+        });
 
     const auto rpcResult = userServiceClient_.queryUser(recipientId, deadline);
-    const bool allowExpired = !rpcResult.call.ok &&
-                              rpcResult.call.error ==
-                                  mprpc::RpcErrorCode::DeadlineExceeded;
-    if (!completeRpcRequest(rpcRequestId, *session, allowExpired) ||
+    bool expired = false;
+    if (!completeRpcRequest(rpcRequestId, *session, &expired) ||
         !isCurrentSession(*session))
         return;
+    if (expired)
+    {
+        sendError(sender, ONE_CHAT_MSG, "RPC_TIMEOUT",
+                  "recipient query deadline exceeded", recipientId, false);
+        return;
+    }
     if (!rpcResult.call.ok)
     {
         sendError(sender, ONE_CHAT_MSG, rpcErrorName(rpcResult.call.error),

@@ -9,10 +9,11 @@ Stage 4 已新增 Qt 5.12.8 桌面客户端，用户已在测试 PC 完成双端
 Stage 5 已新增独立 AIService、DeepSeek V4 Pro HTTPS 适配、ChatServer AI RPC
 隔离执行器与 Qt AI 对话页，并已完成用户提供的 Linux/真实 API 回归。
 Stage 6 已实现双向好友、群组管理、双节点分布式群聊、离线群消息和 Qt 社交页面；
-Windows 构建与单元测试通过，Linux 双节点业务验收待测试机执行。
+Windows 构建与单元测试、Linux 双节点业务探针均已通过。
 Stage 7 已补齐多阶段 Linux 服务镜像、Docker Compose 完整拓扑、独立 MySQL
 Named Volume 初始化、Docker DNS RPC 注册、非破坏性运维脚本和 Windows Release
-发布流水线；Docker/Stage 6 Linux 实机验收仍按测试 PC 结果如实记录。
+发布流水线；Ubuntu 26.04 上 8 容器健康、故障注入、持久化及真实 AI 调用均已验证。
+Stage 6 的双 Qt 图形客户端联调仍待单独验收。
 
 ## 当前目录
 
@@ -37,12 +38,12 @@ Named Volume 初始化、Docker DNS RPC 注册、非破坏性运维脚本和 Win
 - `docs/stage5-test-report.md`：Stage 5 实际 Windows 测试与 Linux 待验证边界。
 - `docs/stage6-implementation.md`：好友、群组、Redis 群聊、SQL 与 Qt 设计。
 - `docs/stage6-linux-testing.md`：Stage 6 Linux 数据迁移、构建、启动和验收命令。
-- `docs/stage6-test-report.md`：Stage 6 Windows 真实结果与 Linux 待验证清单。
+- `docs/stage6-test-report.md`：Stage 6 Windows 与 Linux 实机测试结果、未验证项。
 - `compose.yaml`：MySQL、Redis、ZooKeeper、UserService、AIService、双 ChatServer 和 Nginx 的完整编排。
 - `deploy/docker/`：多阶段后端镜像、容器数据库 Schema、Nginx Stream 配置和环境模板。
 - `docs/stage7-deployment.md`：Stage 7 构建、部署、发布、安全边界与故障排查。
 - `docs/stage7-acceptance.md`：Ubuntu/Windows 最终验收顺序和证据清单。
-- `docs/stage7-test-report.md`：Stage 7 已验证与待验证结果。
+- `docs/stage7-test-report.md`：Stage 7 容器构建、8 服务联调、故障和持久化测试结果。
 - `THIRD_PARTY_NOTICES.md`：依赖版本、来源、许可证提示及课程源码署名边界。
 - `docs/v1-test-report.md`：当前 V1 测试结论、真实证据、未完成项和发布判定。
 - `deploy/`：双实例环境模板、Redis 模板、Nginx stream 配置与启动脚本。

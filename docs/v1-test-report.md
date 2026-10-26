@@ -1,12 +1,19 @@
 # NexusIM V1 测试报告
 
+> **2026-10-26 补充结论：**本报告原表格是 2026-10-20 的历史快照。
+> Stage 5 真实 DeepSeek、Stage 6 Linux 双节点好友/群聊，以及 Stage 7
+> Docker Compose 8 服务、持久化和故障注入现已通过。最新命令与结果见
+> [Stage 6 报告](stage6-test-report.md)和[Stage 7 报告](stage7-test-report.md)。
+> Stage 6 的双 Qt 图形客户端联调仍待单独验收；本文下方旧表中的“待执行”
+> 不代表 2026-10-26 的当前状态。
+
 > 报告更新日期：2026-10-20（Asia/Shanghai）
 >
 > Stage 2 Linux 被测提交：`718ff03979365822f16c9a139d94b85cc74481f6`
 >
 > Stage 3 Linux 被测提交：`ba686aca0e143cc9dc7b7b1faa28636bbddd8acb`
 >
-> 当前结论：**阶段 1–3 已通过对应范围验收；Stage 4 的 Windows 双客户端联调已由用户确认通过。Stage 5 源码、Windows Qt 构建、核心/Mock 测试已完成，Linux 编译和真实 DeepSeek API 仍待测试机验收。完整 Docker Compose 仍未完成。**
+> 2026-10-20 当时结论（历史记录）：**阶段 1–3 已通过对应范围验收；Stage 4 的 Windows 双客户端联调已由用户确认通过。Stage 5 源码、Windows Qt 构建、核心/Mock 测试已完成，Linux 编译和真实 DeepSeek API 仍待测试机验收。完整 Docker Compose 仍未完成。**
 
 ## 1. 执行摘要
 

@@ -95,6 +95,24 @@ Perform each case separately and restore the service before continuing:
 
 Do not use `docker compose down -v` during fault tests.
 
+Automated Linux probes for the four cases above (run after section E created
+`/tmp/nexusim-stage7-persistence.json`):
+
+```bash
+docker compose --env-file .env -f compose.yaml stop chatserver-1
+python3 tests/stage7/nginx_failover_probe.py --expected-node chatserver-2
+docker compose --env-file .env -f compose.yaml start chatserver-1
+
+python3 tests/stage7/compose_fault_probe.py group-redis
+python3 tests/stage7/compose_fault_probe.py user-rpc
+python3 tests/stage7/compose_fault_probe.py ai
+```
+
+The three `compose_fault_probe.py` scenarios restore their stopped service in
+`finally`. The Redis scenario also restarts both ChatServers so their command
+and subscription connections are re-established. Check `docker compose ps`
+afterward.
+
 ## G. Windows release and dual-client demonstration
 
 1. Run `client/qt/release.ps1`.

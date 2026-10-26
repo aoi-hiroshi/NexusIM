@@ -7,23 +7,21 @@ enum class Lookup { Found, Missing, Error };
 
 Lookup userLookup(MySQL &mysql, int userId)
 {
-    MYSQL_RES *result = mysql.queryPrepared(
+    auto result = mysql.queryPrepared(
         "select `id` from `User` where `id`=? limit 1",
         {MySQLParameter::integer(userId)});
     if (result == nullptr) return Lookup::Error;
-    const bool exists = mysql_fetch_row(result) != nullptr;
-    mysql_free_result(result);
+    const bool exists = !result->rows.empty();
     return exists ? Lookup::Found : Lookup::Missing;
 }
 
 Lookup relationshipLookup(MySQL &mysql, int userId, int friendId)
 {
-    MYSQL_RES *result = mysql.queryPrepared(
+    auto result = mysql.queryPrepared(
         "select 1 from `Friend` where `user_id`=? and `friend_id`=? limit 1",
         {MySQLParameter::integer(userId), MySQLParameter::integer(friendId)});
     if (result == nullptr) return Lookup::Error;
-    const bool exists = mysql_fetch_row(result) != nullptr;
-    mysql_free_result(result);
+    const bool exists = !result->rows.empty();
     return exists ? Lookup::Found : Lookup::Missing;
 }
 } // namespace
@@ -97,23 +95,21 @@ vector<User> FriendModel::query(int userid, bool *querySucceeded)
     MySQL mysql;
     if (mysql.connect())
     {
-        MYSQL_RES *res = mysql.queryPrepared(
+        auto res = mysql.queryPrepared(
             "select distinct a.`id`,a.`name`,a.`state` from `User` a "
             "inner join `Friend` b on b.`friend_id`=a.`id` "
             "where b.`user_id`=? order by a.`id`",
             {MySQLParameter::integer(userid)});
         if (res != nullptr)
         {
-            MYSQL_ROW row;
-            while((row = mysql_fetch_row(res)) != nullptr)
+            for (const auto &row : res->rows)
             {
                 User user;
-                user.setId(atoi(row[0]));
-                user.setName(row[1]);
-                user.setState(row[2]);
+                user.setId(atoi(row[0].value_or("0").c_str()));
+                user.setName(row[1].value_or(""));
+                user.setState(row[2].value_or("offline"));
                 vec.push_back(user);
             }
-            mysql_free_result(res);
             if (querySucceeded) *querySucceeded = true;
             return vec;
         }

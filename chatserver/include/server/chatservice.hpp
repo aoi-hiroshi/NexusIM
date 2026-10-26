@@ -77,7 +77,13 @@ private:
                                 nexusim::PendingRequestRegistry::Clock::time_point deadline);
     bool completeRpcRequest(const std::string &requestId,
                             const nexusim::SessionContext &session,
-                            bool allowExpired = false);
+                            bool *expired = nullptr);
+    void scheduleRpcTimeout(
+        const muduo::net::TcpConnectionPtr &connection,
+        const nexusim::SessionContext &session,
+        const std::string &requestId,
+        nexusim::PendingRequestRegistry::Clock::time_point deadline,
+        std::function<void(const muduo::net::TcpConnectionPtr &)> onTimeout);
     std::chrono::milliseconds rpcTimeout() const;
     std::chrono::milliseconds aiRpcTimeout() const;
     std::string beginAiRpcRequest(

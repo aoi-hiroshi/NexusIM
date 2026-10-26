@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 ARG UBUNTU_VERSION=24.04
 
 FROM ubuntu:${UBUNTU_VERSION} AS builder
@@ -12,15 +11,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl-dev libzookeeper-mt-dev && \
     rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/chenshuo/muduo.git /tmp/muduo && \
+ARG BUILD_JOBS=2
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL --retry 3 \
+        "https://codeload.github.com/chenshuo/muduo/tar.gz/${MUDUO_COMMIT}" \
+        -o /tmp/muduo.tar.gz && \
+    echo "49466c5b09ac70a9813fd7c103fed8d818fcef43b92c6e4df82749e236f88809  /tmp/muduo.tar.gz" \
+        | sha256sum -c - && \
+    mkdir -p /tmp/muduo && \
+    tar -xzf /tmp/muduo.tar.gz -C /tmp/muduo --strip-components=1 && \
     cd /tmp/muduo && \
-    git checkout "${MUDUO_COMMIT}" && \
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
-        -DBUILD_EXAMPLES=OFF \
-        -DBUILD_TESTING=OFF && \
-    cmake --build build --parallel "$(nproc)" && \
+        -DMUDUO_BUILD_EXAMPLES=OFF && \
+    cmake --build build --parallel "${BUILD_JOBS}" && \
     cmake --install build && \
     ldconfig
 
@@ -31,7 +38,7 @@ RUN cmake -S . -B /tmp/nexusim-build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/opt/nexusim/stage \
         -DNEXUSIM_BUILD_TESTS=OFF && \
-    cmake --build /tmp/nexusim-build --parallel "$(nproc)" \
+    cmake --build /tmp/nexusim-build --parallel "${BUILD_JOBS}" \
         --target ChatServer UserService AIService && \
     cmake --install /tmp/nexusim-build
 
@@ -46,7 +53,9 @@ RUN set -eux; \
         /opt/nexusim/stage/bin/UserService \
         /opt/nexusim/stage/bin/AIService; do \
       ldd "${binary}"; \
-    done | awk '/=> \/[^ ]+/ {print $3} /^\// {print $1}' | sort -u \
+    done | awk '/=> \/[^ ]+/ {print $3} /^\// {print $1}' \
+      | while IFS= read -r library; do realpath -e "${library}"; done \
+      | sort -u \
       | xargs -r -I '{}' cp -L --parents '{}' /opt/nexusim/runtime-libs
 
 FROM ubuntu:${UBUNTU_VERSION} AS runtime

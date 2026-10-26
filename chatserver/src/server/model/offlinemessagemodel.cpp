@@ -58,18 +58,16 @@ vector<string> OfflineMsgModel::query(int userid)
     MySQL mysql;
     if (mysql.connect())
     {
-        MYSQL_RES *res = mysql.queryPrepared(
+        auto res = mysql.queryPrepared(
             "select `message` from `OfflineMessage` where `user_id`=? order by `id`",
             {MySQLParameter::integer(userid)});
         if (res != nullptr)
         {
             // 把userid用户的所有离线消息放入vec中返回
-            MYSQL_ROW row;
-            while((row = mysql_fetch_row(res)) != nullptr)
+            for (const auto &row : res->rows)
             {
-                vec.push_back(row[0]);
+                vec.push_back(row[0].value_or(""));
             }
-            mysql_free_result(res);
             return vec;
         }
     }

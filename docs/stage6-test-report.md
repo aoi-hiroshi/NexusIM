@@ -41,7 +41,7 @@ Stage 6 源码实现和 Windows 可执行测试已完成。Windows Qt 5.12.8 + V
 测试时将 `E:\Qt\Qt5.12.8\5.12.8\msvc2017_64\bin` 加入当前进程 PATH，然后执行
 Release 配置的 CTest。
 
-## Linux 待验证
+## Linux 待验证（2026-10-20 原始记录）
 
 以下项目尚未在本轮开发机实际运行，因此当前不能记为 PASS：
 
@@ -56,6 +56,29 @@ Release 配置的 CTest。
 
 可复现命令和判定标准见 `docs/stage6-linux-testing.md`。Linux 用户回传真实输出后，
 应在本报告追加“Linux 实机结果”，而不是覆盖本节的历史记录。
+
+## Linux 实机结果（2026-10-26 补测）
+
+在 Ubuntu 26.04 VMware 虚拟机的独立 Git worktree 中，基于 `1ec4727` 加本次
+MySQL prepared SELECT 兼容修复构建；原课程快照与原工作目录的本地文件未被覆盖。
+原生 `ChatServer`、`UserService`、`AIService` 均编译通过，CTest 5/5 通过。
+首次构建遇到 `mysql_stmt_get_result` 未声明；改用 MySQL C API 的
+`mysql_stmt_bind_result`、`mysql_stmt_fetch` 和 RAII 结果对象后重新构建成功。
+
+| 真实测试 | 结果 | 证据 |
+|---|---|---|
+| 原生双节点好友/群组探针 | PASS | 好友双向及幂等、建群/入群/查询/权限、同节点和跨节点群聊、可信发送者身份、单次离线存储、退群规则；`group_id=1` |
+| 容器内同一探针 | PASS | 首次 `group_id=1`，服务恢复后 `group_id=3`；最终故障后回归 `group_id=5` |
+| Redis 容器中断时群聊 | PASS | `stage6_group_redis_failure_probe: PASS seconds=0.050 queued=1 failed=0`；恢复 Redis 与两个 ChatServer 后健康检查通过 |
+| Stage 1/2 回归 | PASS | 分帧、会话鉴权、本节点/跨节点单聊、重复登录、Presence、Nginx 分流均通过 |
+| 真实 DeepSeek 回归 | PASS | 原生请求约 1.690 秒；容器入口最终请求约 1.365 秒，均返回完整文本 |
+
+既有 MySQL `Friend(user_id, friend_id)` 和 `GroupUser(group_id, user_id)`
+已经各有复合主键，原生库无需重复添加相同唯一约束。新建容器数据库执行了
+`001-schema.sql` 和 `003_stage6_relationship_constraints.sql`，随后完成上述黑盒测试。
+
+本轮没有使用两台 Windows Qt 客户端进行 Stage 6 图形界面联调；这一项仍待人工验收。
+以上秒数是单次故障/请求的观测值，不是性能基准。
 
 ## 已知限制
 

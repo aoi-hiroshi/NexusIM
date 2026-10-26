@@ -37,21 +37,16 @@ UserQueryStatus UserModel::queryById(int id, User &user)
     if (id <= 0) return UserQueryStatus::NotFound;
     MySQL mysql;
     if (!mysql.connect()) return UserQueryStatus::Error;
-    MYSQL_RES *res = mysql.queryPrepared(
+    auto res = mysql.queryPrepared(
         "select `id`,`name`,`password`,`state` from `User` where `id`=? limit 1",
         {MySQLParameter::integer(id)});
     if (res == nullptr) return UserQueryStatus::Error;
-    MYSQL_ROW row = mysql_fetch_row(res);
-    if (row == nullptr)
-    {
-        mysql_free_result(res);
-        return UserQueryStatus::NotFound;
-    }
-    user.setId(atoi(row[0]));
-    user.setName(row[1] == nullptr ? "" : row[1]);
-    user.setPwd(row[2] == nullptr ? "" : row[2]);
-    user.setState(row[3] == nullptr ? "offline" : row[3]);
-    mysql_free_result(res);
+    if (res->rows.empty()) return UserQueryStatus::NotFound;
+    const auto &row = res->rows.front();
+    user.setId(atoi(row[0].value_or("0").c_str()));
+    user.setName(row[1].value_or(""));
+    user.setPwd(row[2].value_or(""));
+    user.setState(row[3].value_or("offline"));
     return UserQueryStatus::Found;
 }
 
